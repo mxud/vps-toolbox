@@ -1,0 +1,14 @@
+name: Build and test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke test
+        run: bash tests/smoke.sh
+      - name: Ensure release script is committed and current
+        run: git diff --exit-code -- dist/vps-toolbox.sh

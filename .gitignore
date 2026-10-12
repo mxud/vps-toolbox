@@ -1,0 +1,4 @@
+*.bak
+*.log
+.DS_Store
+# dist/vps-toolbox.sh is committed for one-command installation.
