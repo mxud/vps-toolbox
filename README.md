@@ -22,7 +22,7 @@
 ## 一键安装
 
 ```
-curl -fsSLo /tmp/vps-install.sh https://raw.githubusercontent.com/mxud/vps-toolbox/main/install.sh && sudo bash /tmp/vps-install.sh mxud/vps-toolbox
+curl -fsSLO https://raw.githubusercontent.com/mxud/vps-toolbox/main/install.sh && sudo bash install.sh mxud/vps-toolbox
 ```
 
 安装完成后执行：
