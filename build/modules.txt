@@ -6,6 +6,7 @@ core/service.sh
 core/network.sh
 modules/system/swap.sh
 modules/docker/docker.sh
+modules/caddy/caddy.sh
 modules/system/maintenance.sh
 modules/system/info.sh
 modules/system/tools.sh

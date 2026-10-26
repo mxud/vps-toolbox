@@ -9,6 +9,7 @@ VPS 工具箱 v$sh_v
   $VPS_DEFAULT_SHORTCUT clean          系统清理
   $VPS_DEFAULT_SHORTCUT tools          基础工具管理
   $VPS_DEFAULT_SHORTCUT docker         Docker 管理
+  $VPS_DEFAULT_SHORTCUT caddy          Caddy 管理
   $VPS_DEFAULT_SHORTCUT bbr            BBR 管理
   $VPS_DEFAULT_SHORTCUT warp           WARP 管理
   $VPS_DEFAULT_SHORTCUT test           测试脚本合集

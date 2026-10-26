@@ -21,6 +21,7 @@ vps_menu() {
         echo -e "${gl_kjlan}7.${gl_bai}   WARP 管理"
         echo -e "${gl_kjlan}8.${gl_bai}   测试脚本合集"
         echo -e "${gl_kjlan}9.${gl_bai}   系统工具"
+        echo -e "${gl_kjlan}10.${gl_bai}  Caddy 管理"
         echo -e "${gl_kjlan}------------------------${gl_bai}"
         echo -e "${gl_kjlan}00.${gl_bai}  脚本更新"
         echo -e "${gl_kjlan}0.${gl_bai}   退出脚本"
@@ -37,6 +38,7 @@ vps_menu() {
             7)  linux_warp ;;
             8)  linux_test ;;
             9)  linux_settings ;;
+            10) caddy_menu ;;
             00) vps_update ;;
             0)  clear ; exit 0 ;;
             *)  echo "无效的输入" ; sleep 1 ;;

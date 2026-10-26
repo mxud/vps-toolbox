@@ -16,6 +16,7 @@ vps_main() {
         clean|清理)              linux_clean ;;
         tools|工具)              linux_tools ;;
         docker)                  docker_menu ;;
+        caddy)                   caddy_menu ;;
         bbr)                     linux_bbr ;;
         warp)                    linux_warp ;;
         test|check|测试)         linux_test ;;
