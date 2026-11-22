@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ============================================================
 
-sh_v="0.1.1"
+sh_v="0.1.2"
 
 # ============ 颜色定义 ============
 gl_hui='\e[37m'
@@ -25,7 +25,7 @@ VPS_UPDATE_URL="${VPS_UPDATE_URL:-}"
 if [ -z "$VPS_UPDATE_URL" ] && [ -r /etc/vps-toolbox.repo ]; then
     IFS= read -r vps_repo < /etc/vps-toolbox.repo || true
     if [[ "$vps_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-        VPS_UPDATE_URL="https://raw.githubusercontent.com/${vps_repo}/main/dist/vps-toolbox.sh"
+        VPS_UPDATE_URL="${gh_proxy}raw.githubusercontent.com/${vps_repo}/main/dist/vps-toolbox.sh"
     fi
 fi
 gh_proxy="${VPS_GITHUB_PROXY:-https://}"
@@ -125,7 +125,7 @@ vps_self_install() {
 break_end() {
     echo "已返回；操作结果以上方输出为准。"
     echo "按任意键继续..."
-    read -n 1 -s -r -p "" || return 0
+    read -n 1 -s -r -p "" || true
     echo ""
     clear
 }
@@ -370,16 +370,8 @@ vps_set_ip_preference() {
 }
 
 ip_address() {
-    local isp_info
-    isp_info=$(curl -fsS --max-time 3 https://ipinfo.io/org 2>/dev/null || echo "")
-
-    if echo "$isp_info" | grep -Eiq 'CHINANET|mobile|unicom|telecom'; then
-        ipv4_address=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[^ ]+' || \
-                       hostname -I 2>/dev/null | awk '{print $1}')
-    else
-        ipv4_address=$(curl -s --max-time 3 https://ipinfo.io/ip 2>/dev/null)
-    fi
-
+    # 外部获取，移除容易取到 NAT 内部 IP 的路由判断
+    ipv4_address=$(curl -s --max-time 2 ipv4.ip.sb -q 2>/dev/null || curl -s --max-time 2 https://ipinfo.io/ip 2>/dev/null)
     ipv6_address=$(curl -s --max-time 2 https://v6.ipinfo.io/ip 2>/dev/null)
 }
 
@@ -647,7 +639,6 @@ CADDY_BACKUP=/etc/caddy/vps-toolbox-backups
 
 caddy_need_root() { [[ $EUID -eq 0 ]] || { echo '需要 root 权限'; return 1; }; }
 caddy_need_binary() { command -v caddy >/dev/null 2>&1 || { echo '请先安装 Caddy'; return 1; }; }
-caddy_pause() { read -r -p '按回车键继续...' _ || :; }
 caddy_domain_ok() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && $1 == *.* && $1 != *..* && ${#1} -le 253 ]]; }
 caddy_ipv4_ok() {
     local ip=$1 a b c d n
@@ -1050,8 +1041,8 @@ caddy_add_menu() {
         echo '0) 返回'
         read -r -p '请选择：' choice || return 0
         case "$choice" in
-            1) caddy_add standard; caddy_pause; return 0 ;;
-            2) caddy_add realip; caddy_pause; return 0 ;;
+            1) caddy_add standard; break_end; return 0 ;;
+            2) caddy_add realip; break_end; return 0 ;;
             0) return 0 ;;
             *) echo '无效选择' ;;
         esac
@@ -1066,25 +1057,25 @@ caddy_menu() {
         printf '\033[32m1) 安装/升级 Caddy\n2) 添加反向代理\n3) 查看服务状态与反代配置\n4) 删除反代\n5) 格式化、校验并重载配置\n6) 导出迁移备份\n7) 导入迁移备份\n8) 清空/重置反代配置\n9) 卸载 Caddy（保留配置）\n0) 返回上级菜单\033[0m\n\n'
         read -r -p '请选择：' choice || return 0
         case "$choice" in
-            1) caddy_install; caddy_pause ;;
+            1) caddy_install; break_end ;;
             2) caddy_add_menu ;;
-            3) caddy_list; caddy_pause ;;
-            4) caddy_delete; caddy_pause ;;
-            5) caddy_check_reload; caddy_pause ;;
-            6) caddy_export_migration; caddy_pause ;;
-            7) caddy_import_migration; caddy_pause ;;
-            8) caddy_reset; caddy_pause ;;
+            3) caddy_list; break_end ;;
+            4) caddy_delete; break_end ;;
+            5) caddy_check_reload; break_end ;;
+            6) caddy_export_migration; break_end ;;
+            7) caddy_import_migration; break_end ;;
+            8) caddy_reset; break_end ;;
             9)
-                caddy_need_root || { caddy_pause; continue; }
+                caddy_need_root || { break_end; continue; }
                 echo '将卸载 Caddy 软件包，但保留 /etc/caddy 配置和证书数据，方便之后迁移或重新安装。'
                 read -r -p '输入 UNINSTALL 确认：' answer || return 0
                 if [[ $answer == UNINSTALL ]]; then
                     systemctl disable --now caddy 2>/dev/null || true
                     if command -v apt-get >/dev/null 2>&1; then apt-get remove -y caddy; else echo '当前仅支持通过 APT 卸载 Caddy'; fi
                 fi
-                caddy_pause ;;
+                break_end ;;
             0) return 0 ;;
-            *) echo '无效选择'; caddy_pause ;;
+            *) echo '无效选择'; break_end ;;
         esac
     done
 }
@@ -1182,7 +1173,7 @@ output_status() {
 
 current_timezone() {
     if command -v timedatectl &>/dev/null; then
-        timedatectl | grep "Time zone" | awk '{print $3}'
+        timedatectl show -p Timezone --value 2>/dev/null || date +"%Z %z"
     else
         date +"%Z %z"
     fi
@@ -1197,19 +1188,33 @@ linux_info() {
     local os_info kernel hostname uptime_str load timezone current_time
     local congestion queue dns_servers tcp_conn udp_conn
 
-    ip_address
+    # 开启后台并发采集网络信息
+    local tmp_ip
+    tmp_ip=$(mktemp /tmp/vps_ip.XXXXXX)
+    (
+        ip_address
+        echo "ipv4_address='$ipv4_address'" > "$tmp_ip"
+        echo "ipv6_address='$ipv6_address'" >> "$tmp_ip"
+    ) &
+    local ip_pid=$!
 
-    # 1. CPU 采集 (彻底解决 Debian 下 lscpu 缺失/语言匹配失败)
-    cpu_info=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
-    [ -z "$cpu_info" ] && cpu_info=$(grep -m1 -E 'Hardware|Processor' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
+    cpu_info=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ 	]*//')
+    [ -z "$cpu_info" ] && cpu_info=$(grep -m1 -E 'Hardware|Processor' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ 	]*//')
     [ -z "$cpu_info" ] && cpu_info="未知型号"
 
     cpu_cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo)
     cpu_freq=$(grep -m1 -i "cpu MHz" /proc/cpuinfo | awk '{printf "%.1f GHz", $4/1000}')
+    [ -z "$cpu_freq" ] && [ -f /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ] && cpu_freq=$(awk '{printf "%.1f GHz", $1/1000000}' /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
     [ -z "$cpu_freq" ] && cpu_freq="虚拟化/不可用"
 
+    # 复用 1 秒的等待时间来做 CPU 采样，同时后台的 IP 请求也在进行
     cpu_usage=$(awk '{idle=$5+$6; total=0; for(i=2;i<=9;i++)total+=$i; if(NR==1){idle1=idle; total1=total;} else {dt=total-total1; printf "%.0f\n", (dt>0 ? (dt-(idle-idle1))*100/dt : 0)}}' \
         <(grep 'cpu ' /proc/stat) <(sleep 1; grep 'cpu ' /proc/stat))
+
+    wait $ip_pid
+    source "$tmp_ip" 2>/dev/null || true
+    rm -f -- "$tmp_ip"
+
 
     # 2. 内存与 Swap 采集 (统一走 /proc/meminfo，精准无误)
     local mem_total mem_avail mem_used mem_p
@@ -1329,7 +1334,12 @@ linux_tools() {
         read -r -e -p "请输入你的选择: " choice || return 0
 
         case $choice in
-            1) pkg_install "${tools[@]}" ; break_end ;;
+            1)
+                for tool in "${tools[@]}"; do
+                    pkg_install "$tool" >/dev/null 2>&1 || echo "⚠️ 无法安装: $tool"
+                done
+                break_end
+                ;;
             2)
                 read -r -e -p "请输入要安装的工具（空格分隔）: " -a custom_tools || return 0
                 [ ${#custom_tools[@]} -gt 0 ] && pkg_install "${custom_tools[@]}"
@@ -1430,7 +1440,7 @@ linux_bbr() {
 
 linux_warp() {
     clear
-    run_remote_bash "https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
+    run_remote_bash "${gh_proxy}gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
 }
 
 
@@ -1466,15 +1476,15 @@ linux_test() {
         read -r -e -p "请输入你的选择: " choice || return 0
 
         case $choice in
-            1)  run_remote_bash https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh ;;
-            2)  run_remote_bash https://github.com/lmc999/RegionRestrictionCheck/raw/main/check.sh ;;
+            1)  run_remote_bash ${gh_proxy}raw.githubusercontent.com/xykt/IPQuality/main/ip.sh ;;
+            2)  run_remote_bash ${gh_proxy}github.com/lmc999/RegionRestrictionCheck/raw/main/check.sh ;;
             3)  run_remote_bash "https://git.io/besttrace" ;;
-            4)  run_remote_bash https://raw.githubusercontent.com/zhanghanyun/backtrace/main/install.sh ;;
-            5)  run_remote_bash "https://raw.githubusercontent.com/MiaM1ku/taierspeedtest/main/taierspeedtest.sh" ;;
-            6)  run_remote_bash "https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh" ;;
+            4)  run_remote_bash ${gh_proxy}raw.githubusercontent.com/zhanghanyun/backtrace/main/install.sh ;;
+            5)  run_remote_bash "${gh_proxy}raw.githubusercontent.com/MiaM1ku/taierspeedtest/main/taierspeedtest.sh" ;;
+            6)  run_remote_bash "${gh_proxy}raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh" ;;
             7)  check_swap; run_remote_bash https://yabs.sh -i -5 ;;
-            8)  check_swap; run_remote_bash "https://raw.githubusercontent.com/xykt/HardwareQuality/main/hq.sh" ;;
-            9)  run_remote_bash https://github.com/spiritLHLS/ecs/raw/main/ecs.sh ;;
+            8)  check_swap; run_remote_bash "${gh_proxy}raw.githubusercontent.com/xykt/HardwareQuality/main/hq.sh" ;;
+            9)  run_remote_bash ${gh_proxy}github.com/spiritLHLS/ecs/raw/main/ecs.sh ;;
             10) run_remote_bash "https://run.NodeQuality.com" ;;
             0)  break ;;
             *)  echo "无效选择" ; sleep 1 ;;
@@ -1816,7 +1826,7 @@ vps_ssh_key_menu() {
             2)
                 read -r -e -p "GitHub 用户名: " username || return 0
                 if [[ "$username" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
-                    vps_ssh_import_url "https://github.com/${username}.keys"
+                    vps_ssh_import_url "${gh_proxy}github.com/${username}.keys"
                 else echo "GitHub 用户名无效" >&2; fi
                 break_end ;;
             3) read -r -e -p "HTTPS 公钥地址: " input || return 0; vps_ssh_import_url "$input"; break_end ;;
@@ -1937,18 +1947,6 @@ vps_dns_test() {
     fi
 }
 
-vps_dns_probe() {
-    local server
-    command -v nslookup >/dev/null 2>&1 || pkg_install dnsutils || return 1
-    command -v timeout >/dev/null 2>&1 || pkg_install coreutils || return 1
-    for server in "$@"; do
-        if ! timeout 12 nslookup example.com "$server" >/dev/null 2>&1; then
-            echo "DNS $server 的直接解析测试失败，未修改配置" >&2
-            return 1
-        fi
-    done
-}
-
 vps_dns_apply() {
     local first_v4="$1" second_v4="$2" first_v6="${3:-}" second_v6="${4:-}"
     local mode backup previous candidate config dns_list=""
@@ -1969,7 +1967,7 @@ vps_dns_apply() {
     fi
 
     mode=$(vps_dns_mode) || return 1
-    vps_dns_probe "$first_v4" "$second_v4" || return 1
+
     if [ "$mode" = resolved ]; then
         config=/etc/systemd/resolved.conf.d/99-vps-toolbox-dns.conf
         mkdir -p /etc/systemd/resolved.conf.d || return 1
@@ -2121,11 +2119,12 @@ vps_dns_menu() {
                 break_end
                 ;;
             3)
-                read -r -e -p "首选 IPv4 DNS: " first_v4 || return 0
-                read -r -e -p "备用 IPv4 DNS: " second_v4 || return 0
-                read -r -e -p "首选 IPv6 DNS (可选，直接回车跳过): " first_v6 || return 0
-                read -r -e -p "备用 IPv6 DNS (可选，直接回车跳过): " second_v6 || return 0
-                vps_dns_apply "$first_v4" "$second_v4" "$first_v6" "$second_v6"
+                local custom_dns
+                read -r -p "输入新的 DNS 地址 (空格分隔，如 8.8.8.8 1.1.1.1): " custom_dns
+                [ -z "$custom_dns" ] && continue
+                # 简单分隔并提取前 4 个 IP
+                read -r -a dns_arr <<< "$custom_dns"
+                vps_dns_apply "${dns_arr[0]}" "${dns_arr[1]:-}" "${dns_arr[2]:-}" "${dns_arr[3]:-}"
                 break_end
                 ;;
             4)
@@ -2208,118 +2207,81 @@ vps_dd_execute() {
     local default_port="22" default_user="root"
     [ "$is_windows" = true ] && { default_port="3389"; default_user="Administrator"; }
 
+    # 自动获取当前 SSH 端口
+    local current_port
+    current_port=$("$(command -v sshd || echo /usr/sbin/sshd)" -T 2>/dev/null | awk '$1=="port" {print $2; exit}')
+    [ -n "$current_port" ] && default_port="$current_port"
+
     clear
     echo -e "${gl_kjlan}==================== 重装系统参数配置 ====================${gl_bai}"
     echo -e "目标系统: ${gl_huang}${os_cmd}${gl_bai}"
-    echo -e "${gl_hong}警告: 重装系统会彻底格式化主硬盘，请确保所有重要数据已备份！${gl_bai}"
+    echo -e "${gl_hong}警告: 重装系统会彻底格式化主硬盘，一旦确认不可逆转！${gl_bai}"
     echo "--------------------------------------------------------"
 
     local auth_display="" auth_type="password"
     local -a auth_args=() port_args=() os_args=() final_cmd=()
-    pkg_install curl ca-certificates || return 1
+    pkg_install curl ca-certificates >/dev/null 2>&1
 
     if [ "$is_windows" = true ]; then
-        # Windows 仅支持密码认证
         local win_pwd
-        read -r -s -p "设置 Windows 密码 (回车自动生成16位高强度密码): " win_pwd || return 0
+        read -r -p "设置 Windows 密码 (回车自动生成16位高强度密码): " win_pwd
         if [ -z "$win_pwd" ]; then
-            win_pwd=$(< /dev/urandom LC_ALL=C tr -dc 'A-Za-z0-9_' 2>/dev/null | head -c 16)
-            [ "${#win_pwd}" -eq 16 ] || { echo "随机密码生成失败" >&2; return 1; }
+            win_pwd=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_' | head -c 16)
         fi
-        echo
         auth_args=(--password "$win_pwd")
         auth_display="密码: ${gl_huang}${win_pwd}${gl_bai}"
     else
-        # Linux 支持多种凭据选择
         echo "请选择登录凭据类型:"
-        echo "1. 从 GitHub 导入公钥 (推荐：输入用户名直接拉取，开机即密钥登录)"
-        echo "2. 手动粘贴 SSH 公钥"
-        echo "3. 设置自定义密码"
-        echo "4. 自动生成 16 位强随机密码"
-        echo "--------------------------------------------------------"
+        echo "1. 自动生成 16 位强随机密码 (默认)"
+        echo "2. 自定义密码"
+        echo "3. 从 GitHub 导入公钥 (纯密钥登录)"
         local cred_choice
-        read -r -e -p "请输入你的选择 [1-4，默认 1]: " cred_choice || return 0
+        read -r -p "请选择 [1-3]: " cred_choice
         cred_choice=${cred_choice:-1}
 
         case "$cred_choice" in
-            1)
-                local gh_user pubkeys line valid_count=0 tmp_keys
-                read -r -e -p "请输入你的 GitHub 用户名: " gh_user || return 0
-                if [[ ! "$gh_user" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
-                    echo "错误: GitHub 用户名格式无效！" >&2
-                    break_end
-                    return 1
-                fi
+            3)
+                local gh_user tmp_keys valid_count=0 key_list=""
+                read -r -p "请输入你的 GitHub 用户名: " gh_user
                 echo "正在拉取 GitHub 公钥..."
-                tmp_keys=$(mktemp /tmp/vps-gh-keys.XXXXXX) || return 1
-                if curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 -o "$tmp_keys" "https://github.com/${gh_user}.keys" && [ -s "$tmp_keys" ]; then
-                    local first_key=""
-                    while IFS= read -r line || [ -n "$line" ]; do
-                        line=${line%$'\r'}
-                        if vps_ssh_valid_key "$line"; then
-                            valid_count=$((valid_count + 1))
-                            [ -z "$first_key" ] && first_key="$line"
-                        fi
-                    done < "$tmp_keys"
-                    rm -f -- "$tmp_keys"
-                    if [ "$valid_count" -gt 0 ]; then
-                        echo -e "${gl_lv}✔ 成功获取到 $valid_count 条有效公钥！${gl_bai}"
-                        auth_type="key"
-                        auth_args=(--ssh-key "$first_key")
-                        auth_display="【纯密钥登录】(已绑定 GitHub: $gh_user)"
-                    else
-                        echo "错误: 未在该 GitHub 用户主页找到合法的 SSH 公钥！" >&2
-                        break_end
-                        return 1
+                tmp_keys=$(mktemp)
+                curl -fsSL "${gh_proxy}github.com/${gh_user}.keys" -o "$tmp_keys"
+                while IFS= read -r line || [ -n "$line" ]; do
+                    line=${line%$'
+'}
+                    if vps_ssh_valid_key "$line"; then
+                        valid_count=$((valid_count + 1))
+                        # 兼容多公钥传入方式（用逗号或多条参数，根据底层重装脚本特性，多数仅取首行，但我们尽可能注入）
+                        [ -n "$line" ] && auth_args+=(--ssh-key "$line")
                     fi
+                done < "$tmp_keys"
+                rm -f -- "$tmp_keys"
+                if [ "$valid_count" -gt 0 ]; then
+                    auth_type="key"
+                    auth_display="【纯密钥登录】(已绑定 GitHub: $gh_user 共 $valid_count 把公钥)"
                 else
-                    rm -f -- "$tmp_keys"
-                    echo "错误: 无法从 GitHub 拉取公钥，请检查用户名是否正确或网络连通性！" >&2
-                    break_end
-                    return 1
+                    echo "错误: 未找到有效的公钥！" >&2; break_end; return 1
                 fi
                 ;;
             2)
-                local manual_key
-                read -r -e -p "请粘贴你的 SSH 公钥: " manual_key || return 0
-                if vps_ssh_valid_key "$manual_key"; then
-                    auth_type="key"
-                    auth_args=(--ssh-key "$manual_key")
-                    auth_display="【纯密钥登录】(手动注入公钥)"
-                else
-                    echo "错误: 输入的公钥格式不正确！" >&2
-                    break_end
-                    return 1
-                fi
-                ;;
-            3)
                 local custom_pwd
-                read -r -s -p "请输入自定义登录密码: " custom_pwd || return 0
-                while [ -z "$custom_pwd" ]; do
-                    read -r -s -p "密码不能为空，请重新输入: " custom_pwd || return 0
-                done
+                read -r -s -p "请输入自定义登录密码: " custom_pwd
                 echo
-                auth_args=(--password "$custom_pwd")
-                auth_display="密码: ${gl_huang}${custom_pwd}${gl_bai}"
+                auth_args=(--password "${custom_pwd:-root}")
+                auth_display="密码: ${gl_huang}${custom_pwd:-root}${gl_bai}"
                 ;;
-            4)
+            *)
                 local rand_pwd
-                rand_pwd=$(< /dev/urandom LC_ALL=C tr -dc 'A-Za-z0-9_' 2>/dev/null | head -c 16)
-                [ "${#rand_pwd}" -eq 16 ] || { echo "随机密码生成失败" >&2; return 1; }
+                rand_pwd=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_' | head -c 16)
                 auth_args=(--password "$rand_pwd")
                 auth_display="密码: ${gl_huang}${rand_pwd}${gl_bai}"
                 ;;
-            *) echo "凭据类型无效，请选择 1 至 4" >&2; return 1 ;;
         esac
     fi
 
-    # 端口输入
     local custom_port
-    read -r -e -p "设置远程连接端口 (回车默认 ${default_port}): " custom_port || return 0
+    read -r -p "设置远程连接端口 (回车保持当前 ${default_port}): " custom_port
     custom_port=${custom_port:-$default_port}
-    while ! vps_valid_port "$custom_port"; do
-        read -r -e -p "端口无效，请重新输入 (1-65535): " custom_port || return 0
-    done
     custom_port=$((10#$custom_port))
 
     if [ "$is_windows" = true ]; then
@@ -2327,47 +2289,41 @@ vps_dd_execute() {
     else
         [ "$custom_port" != "22" ] && port_args=(--ssh-port "$custom_port")
     fi
-    echo -e "生效远程端口: ${gl_huang}${custom_port}${gl_bai}"
 
     echo "--------------------------------------------------------"
     echo -e "重装后登录信息汇总："
     echo -e "用户名:   ${gl_lv}${default_user}${gl_bai}"
     echo -e "认证方式: ${auth_display}"
-    echo -e "远程端口: ${gl_lv}${custom_port}${gl_bai} (新系统开机直接生效)"
+    echo -e "远程端口: ${gl_lv}${custom_port}${gl_bai}"
     echo "--------------------------------------------------------"
-    [ "$auth_type" = "password" ] && echo -e "${gl_hong}请务必截图或保存上方密码！${gl_bai}"
-    read -r -e -p "确认现在开始重装服务器吗？(输入 yes 确认): " confirm || return 0
-    if [ "$confirm" != "yes" ]; then
-        echo "操作已取消。"
-        break_end
-        return
-    fi
+    [ "$auth_type" = "password" ] && echo -e "${gl_hong}请务必保存上方密码！${gl_bai}"
+    
+    read -r -p "确认执行重装？(Y/N): " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "已取消"; break_end; return 0; }
 
     echo -e "${gl_kjlan}正在准备底层重装环境...${gl_bai}"
     local reinstall_sh
-    reinstall_sh=$(mktemp /tmp/reinstall.XXXXXX.sh) || return 1
-    if curl -fsSL --proto '=https' --proto-redir '=https' --max-time 120 --connect-timeout 15 -o "$reinstall_sh" "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh" && [ -s "$reinstall_sh" ] && bash -n "$reinstall_sh"; then
+    reinstall_sh=$(mktemp)
+    if curl -fsSL "${gh_proxy}raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh" -o "$reinstall_sh"; then
         read -r -a os_args <<< "$os_cmd"
-        final_cmd=(bash "$reinstall_sh" "${os_args[@]}" --user "$default_user" "${auth_args[@]}" "${port_args[@]}")
-        "${final_cmd[@]}"
-        local rc=$?
-        rm -f -- "$reinstall_sh"
-        if [ "$rc" -eq 0 ]; then
-            echo -e "${gl_lv}重装环境准备完毕，服务器即将重启进入自动化安装流程...${gl_bai}"
-            echo -e "预计耗时 5~15 分钟，请耐心等待后使用端口 ${gl_huang}${custom_port}${gl_bai} 尝试登录！"
-            sleep 3
-            reboot
+        # 修正 DD 镜像不接受 user/password 的问题
+        if [[ "$os_cmd" == dd\ --img* ]]; then
+            final_cmd=(bash "$reinstall_sh" "${os_args[@]}" "${port_args[@]}")
         else
-            echo "重装脚本执行中断，请检查上方日志输出！" >&2
-            break_end
+            final_cmd=(bash "$reinstall_sh" "${os_args[@]}" --user "$default_user" "${auth_args[@]}" "${port_args[@]}")
+        fi
+        
+        "${final_cmd[@]}"
+        if [ $? -eq 0 ]; then
+            echo -e "${gl_lv}准备完毕，服务器将自动重启安装...${gl_bai}"
+            sleep 3; reboot
+        else
+            echo "重装脚本执行失败！" >&2; break_end
         fi
     else
-        rm -f -- "$reinstall_sh"
-        echo "下载重装脚本失败，请检查网络连通性！" >&2
-        break_end
+        echo "下载重装脚本失败！" >&2; break_end
     fi
 }
-
 vps_dd_menu() {
     root_use || return
     while true; do

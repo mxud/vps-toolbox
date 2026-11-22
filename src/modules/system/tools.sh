@@ -37,7 +37,12 @@ linux_tools() {
         read -r -e -p "请输入你的选择: " choice || return 0
 
         case $choice in
-            1) pkg_install "${tools[@]}" ; break_end ;;
+            1)
+                for tool in "${tools[@]}"; do
+                    pkg_install "$tool" >/dev/null 2>&1 || echo "⚠️ 无法安装: $tool"
+                done
+                break_end
+                ;;
             2)
                 read -r -e -p "请输入要安装的工具（空格分隔）: " -a custom_tools || return 0
                 [ ${#custom_tools[@]} -gt 0 ] && pkg_install "${custom_tools[@]}"

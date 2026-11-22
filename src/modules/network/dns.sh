@@ -82,18 +82,6 @@ vps_dns_test() {
     fi
 }
 
-vps_dns_probe() {
-    local server
-    command -v nslookup >/dev/null 2>&1 || pkg_install dnsutils || return 1
-    command -v timeout >/dev/null 2>&1 || pkg_install coreutils || return 1
-    for server in "$@"; do
-        if ! timeout 12 nslookup example.com "$server" >/dev/null 2>&1; then
-            echo "DNS $server 的直接解析测试失败，未修改配置" >&2
-            return 1
-        fi
-    done
-}
-
 vps_dns_apply() {
     local first_v4="$1" second_v4="$2" first_v6="${3:-}" second_v6="${4:-}"
     local mode backup previous candidate config dns_list=""
@@ -114,7 +102,7 @@ vps_dns_apply() {
     fi
 
     mode=$(vps_dns_mode) || return 1
-    vps_dns_probe "$first_v4" "$second_v4" || return 1
+
     if [ "$mode" = resolved ]; then
         config=/etc/systemd/resolved.conf.d/99-vps-toolbox-dns.conf
         mkdir -p /etc/systemd/resolved.conf.d || return 1
@@ -266,11 +254,12 @@ vps_dns_menu() {
                 break_end
                 ;;
             3)
-                read -r -e -p "首选 IPv4 DNS: " first_v4 || return 0
-                read -r -e -p "备用 IPv4 DNS: " second_v4 || return 0
-                read -r -e -p "首选 IPv6 DNS (可选，直接回车跳过): " first_v6 || return 0
-                read -r -e -p "备用 IPv6 DNS (可选，直接回车跳过): " second_v6 || return 0
-                vps_dns_apply "$first_v4" "$second_v4" "$first_v6" "$second_v6"
+                local custom_dns
+                read -r -p "输入新的 DNS 地址 (空格分隔，如 8.8.8.8 1.1.1.1): " custom_dns
+                [ -z "$custom_dns" ] && continue
+                # 简单分隔并提取前 4 个 IP
+                read -r -a dns_arr <<< "$custom_dns"
+                vps_dns_apply "${dns_arr[0]}" "${dns_arr[1]:-}" "${dns_arr[2]:-}" "${dns_arr[3]:-}"
                 break_end
                 ;;
             4)

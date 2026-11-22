@@ -15,7 +15,8 @@ command -v curl >/dev/null || { echo 'curl is required' >&2; exit 1; }
 command -v install >/dev/null || { echo 'coreutils install is required' >&2; exit 1; }
 tmp="$(mktemp /tmp/vps-toolbox-download.XXXXXXXX)"
 trap 'rm -f -- "$tmp"' EXIT
-url="https://raw.githubusercontent.com/${repo}/${branch}/dist/vps-toolbox.sh"
+gh_proxy="${VPS_GITHUB_PROXY:-https://}"
+url="${gh_proxy}raw.githubusercontent.com/${repo}/${branch}/dist/vps-toolbox.sh"
 echo "Downloading $url"
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 90 "$url" -o "$tmp"
 [[ -s "$tmp" ]] && head -n1 "$tmp" | grep -qx '#!/bin/bash' && grep -qx '# VPS Toolbox' "$tmp" && bash -n "$tmp" || {

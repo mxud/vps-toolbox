@@ -78,16 +78,8 @@ vps_set_ip_preference() {
 }
 
 ip_address() {
-    local isp_info
-    isp_info=$(curl -fsS --max-time 3 https://ipinfo.io/org 2>/dev/null || echo "")
-
-    if echo "$isp_info" | grep -Eiq 'CHINANET|mobile|unicom|telecom'; then
-        ipv4_address=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[^ ]+' || \
-                       hostname -I 2>/dev/null | awk '{print $1}')
-    else
-        ipv4_address=$(curl -s --max-time 3 https://ipinfo.io/ip 2>/dev/null)
-    fi
-
+    # 外部获取，移除容易取到 NAT 内部 IP 的路由判断
+    ipv4_address=$(curl -s --max-time 2 ipv4.ip.sb -q 2>/dev/null || curl -s --max-time 2 https://ipinfo.io/ip 2>/dev/null)
     ipv6_address=$(curl -s --max-time 2 https://v6.ipinfo.io/ip 2>/dev/null)
 }
 

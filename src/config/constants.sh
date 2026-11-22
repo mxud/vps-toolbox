@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ============================================================
 
-sh_v="0.1.1"
+sh_v="0.1.2"
 
 # ============ 颜色定义 ============
 gl_hui='\e[37m'
@@ -25,7 +25,7 @@ VPS_UPDATE_URL="${VPS_UPDATE_URL:-}"
 if [ -z "$VPS_UPDATE_URL" ] && [ -r /etc/vps-toolbox.repo ]; then
     IFS= read -r vps_repo < /etc/vps-toolbox.repo || true
     if [[ "$vps_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-        VPS_UPDATE_URL="https://raw.githubusercontent.com/${vps_repo}/main/dist/vps-toolbox.sh"
+        VPS_UPDATE_URL="${gh_proxy}raw.githubusercontent.com/${vps_repo}/main/dist/vps-toolbox.sh"
     fi
 fi
 gh_proxy="${VPS_GITHUB_PROXY:-https://}"

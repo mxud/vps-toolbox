@@ -5,7 +5,6 @@ CADDY_BACKUP=/etc/caddy/vps-toolbox-backups
 
 caddy_need_root() { [[ $EUID -eq 0 ]] || { echo '需要 root 权限'; return 1; }; }
 caddy_need_binary() { command -v caddy >/dev/null 2>&1 || { echo '请先安装 Caddy'; return 1; }; }
-caddy_pause() { read -r -p '按回车键继续...' _ || :; }
 caddy_domain_ok() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && $1 == *.* && $1 != *..* && ${#1} -le 253 ]]; }
 caddy_ipv4_ok() {
     local ip=$1 a b c d n
@@ -408,8 +407,8 @@ caddy_add_menu() {
         echo '0) 返回'
         read -r -p '请选择：' choice || return 0
         case "$choice" in
-            1) caddy_add standard; caddy_pause; return 0 ;;
-            2) caddy_add realip; caddy_pause; return 0 ;;
+            1) caddy_add standard; break_end; return 0 ;;
+            2) caddy_add realip; break_end; return 0 ;;
             0) return 0 ;;
             *) echo '无效选择' ;;
         esac
@@ -424,25 +423,25 @@ caddy_menu() {
         printf '\033[32m1) 安装/升级 Caddy\n2) 添加反向代理\n3) 查看服务状态与反代配置\n4) 删除反代\n5) 格式化、校验并重载配置\n6) 导出迁移备份\n7) 导入迁移备份\n8) 清空/重置反代配置\n9) 卸载 Caddy（保留配置）\n0) 返回上级菜单\033[0m\n\n'
         read -r -p '请选择：' choice || return 0
         case "$choice" in
-            1) caddy_install; caddy_pause ;;
+            1) caddy_install; break_end ;;
             2) caddy_add_menu ;;
-            3) caddy_list; caddy_pause ;;
-            4) caddy_delete; caddy_pause ;;
-            5) caddy_check_reload; caddy_pause ;;
-            6) caddy_export_migration; caddy_pause ;;
-            7) caddy_import_migration; caddy_pause ;;
-            8) caddy_reset; caddy_pause ;;
+            3) caddy_list; break_end ;;
+            4) caddy_delete; break_end ;;
+            5) caddy_check_reload; break_end ;;
+            6) caddy_export_migration; break_end ;;
+            7) caddy_import_migration; break_end ;;
+            8) caddy_reset; break_end ;;
             9)
-                caddy_need_root || { caddy_pause; continue; }
+                caddy_need_root || { break_end; continue; }
                 echo '将卸载 Caddy 软件包，但保留 /etc/caddy 配置和证书数据，方便之后迁移或重新安装。'
                 read -r -p '输入 UNINSTALL 确认：' answer || return 0
                 if [[ $answer == UNINSTALL ]]; then
                     systemctl disable --now caddy 2>/dev/null || true
                     if command -v apt-get >/dev/null 2>&1; then apt-get remove -y caddy; else echo '当前仅支持通过 APT 卸载 Caddy'; fi
                 fi
-                caddy_pause ;;
+                break_end ;;
             0) return 0 ;;
-            *) echo '无效选择'; caddy_pause ;;
+            *) echo '无效选择'; break_end ;;
         esac
     done
 }

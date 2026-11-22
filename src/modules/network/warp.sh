@@ -2,6 +2,6 @@
 
 linux_warp() {
     clear
-    run_remote_bash "https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
+    run_remote_bash "${gh_proxy}gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
 }
 

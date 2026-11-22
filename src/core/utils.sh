@@ -3,7 +3,7 @@
 break_end() {
     echo "已返回；操作结果以上方输出为准。"
     echo "按任意键继续..."
-    read -n 1 -s -r -p "" || return 0
+    read -n 1 -s -r -p "" || true
     echo ""
     clear
 }

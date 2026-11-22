@@ -19,7 +19,7 @@ output_status() {
 
 current_timezone() {
     if command -v timedatectl &>/dev/null; then
-        timedatectl | grep "Time zone" | awk '{print $3}'
+        timedatectl show -p Timezone --value 2>/dev/null || date +"%Z %z"
     else
         date +"%Z %z"
     fi
@@ -34,19 +34,33 @@ linux_info() {
     local os_info kernel hostname uptime_str load timezone current_time
     local congestion queue dns_servers tcp_conn udp_conn
 
-    ip_address
+    # 开启后台并发采集网络信息
+    local tmp_ip
+    tmp_ip=$(mktemp /tmp/vps_ip.XXXXXX)
+    (
+        ip_address
+        echo "ipv4_address='$ipv4_address'" > "$tmp_ip"
+        echo "ipv6_address='$ipv6_address'" >> "$tmp_ip"
+    ) &
+    local ip_pid=$!
 
-    # 1. CPU 采集 (彻底解决 Debian 下 lscpu 缺失/语言匹配失败)
-    cpu_info=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
-    [ -z "$cpu_info" ] && cpu_info=$(grep -m1 -E 'Hardware|Processor' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
+    cpu_info=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ 	]*//')
+    [ -z "$cpu_info" ] && cpu_info=$(grep -m1 -E 'Hardware|Processor' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ 	]*//')
     [ -z "$cpu_info" ] && cpu_info="未知型号"
 
     cpu_cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo)
     cpu_freq=$(grep -m1 -i "cpu MHz" /proc/cpuinfo | awk '{printf "%.1f GHz", $4/1000}')
+    [ -z "$cpu_freq" ] && [ -f /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ] && cpu_freq=$(awk '{printf "%.1f GHz", $1/1000000}' /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
     [ -z "$cpu_freq" ] && cpu_freq="虚拟化/不可用"
 
+    # 复用 1 秒的等待时间来做 CPU 采样，同时后台的 IP 请求也在进行
     cpu_usage=$(awk '{idle=$5+$6; total=0; for(i=2;i<=9;i++)total+=$i; if(NR==1){idle1=idle; total1=total;} else {dt=total-total1; printf "%.0f\n", (dt>0 ? (dt-(idle-idle1))*100/dt : 0)}}' \
         <(grep 'cpu ' /proc/stat) <(sleep 1; grep 'cpu ' /proc/stat))
+
+    wait $ip_pid
+    source "$tmp_ip" 2>/dev/null || true
+    rm -f -- "$tmp_ip"
+
 
     # 2. 内存与 Swap 采集 (统一走 /proc/meminfo，精准无误)
     local mem_total mem_avail mem_used mem_p

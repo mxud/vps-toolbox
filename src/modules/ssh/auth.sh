@@ -240,7 +240,7 @@ vps_ssh_key_menu() {
             2)
                 read -r -e -p "GitHub 用户名: " username || return 0
                 if [[ "$username" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
-                    vps_ssh_import_url "https://github.com/${username}.keys"
+                    vps_ssh_import_url "${gh_proxy}github.com/${username}.keys"
                 else echo "GitHub 用户名无效" >&2; fi
                 break_end ;;
             3) read -r -e -p "HTTPS 公钥地址: " input || return 0; vps_ssh_import_url "$input"; break_end ;;

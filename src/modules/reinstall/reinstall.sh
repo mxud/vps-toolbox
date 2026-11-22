@@ -3,118 +3,81 @@ vps_dd_execute() {
     local default_port="22" default_user="root"
     [ "$is_windows" = true ] && { default_port="3389"; default_user="Administrator"; }
 
+    # 自动获取当前 SSH 端口
+    local current_port
+    current_port=$("$(command -v sshd || echo /usr/sbin/sshd)" -T 2>/dev/null | awk '$1=="port" {print $2; exit}')
+    [ -n "$current_port" ] && default_port="$current_port"
+
     clear
     echo -e "${gl_kjlan}==================== 重装系统参数配置 ====================${gl_bai}"
     echo -e "目标系统: ${gl_huang}${os_cmd}${gl_bai}"
-    echo -e "${gl_hong}警告: 重装系统会彻底格式化主硬盘，请确保所有重要数据已备份！${gl_bai}"
+    echo -e "${gl_hong}警告: 重装系统会彻底格式化主硬盘，一旦确认不可逆转！${gl_bai}"
     echo "--------------------------------------------------------"
 
     local auth_display="" auth_type="password"
     local -a auth_args=() port_args=() os_args=() final_cmd=()
-    pkg_install curl ca-certificates || return 1
+    pkg_install curl ca-certificates >/dev/null 2>&1
 
     if [ "$is_windows" = true ]; then
-        # Windows 仅支持密码认证
         local win_pwd
-        read -r -s -p "设置 Windows 密码 (回车自动生成16位高强度密码): " win_pwd || return 0
+        read -r -p "设置 Windows 密码 (回车自动生成16位高强度密码): " win_pwd
         if [ -z "$win_pwd" ]; then
-            win_pwd=$(< /dev/urandom LC_ALL=C tr -dc 'A-Za-z0-9_' 2>/dev/null | head -c 16)
-            [ "${#win_pwd}" -eq 16 ] || { echo "随机密码生成失败" >&2; return 1; }
+            win_pwd=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_' | head -c 16)
         fi
-        echo
         auth_args=(--password "$win_pwd")
         auth_display="密码: ${gl_huang}${win_pwd}${gl_bai}"
     else
-        # Linux 支持多种凭据选择
         echo "请选择登录凭据类型:"
-        echo "1. 从 GitHub 导入公钥 (推荐：输入用户名直接拉取，开机即密钥登录)"
-        echo "2. 手动粘贴 SSH 公钥"
-        echo "3. 设置自定义密码"
-        echo "4. 自动生成 16 位强随机密码"
-        echo "--------------------------------------------------------"
+        echo "1. 自动生成 16 位强随机密码 (默认)"
+        echo "2. 自定义密码"
+        echo "3. 从 GitHub 导入公钥 (纯密钥登录)"
         local cred_choice
-        read -r -e -p "请输入你的选择 [1-4，默认 1]: " cred_choice || return 0
+        read -r -p "请选择 [1-3]: " cred_choice
         cred_choice=${cred_choice:-1}
 
         case "$cred_choice" in
-            1)
-                local gh_user pubkeys line valid_count=0 tmp_keys
-                read -r -e -p "请输入你的 GitHub 用户名: " gh_user || return 0
-                if [[ ! "$gh_user" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
-                    echo "错误: GitHub 用户名格式无效！" >&2
-                    break_end
-                    return 1
-                fi
+            3)
+                local gh_user tmp_keys valid_count=0 key_list=""
+                read -r -p "请输入你的 GitHub 用户名: " gh_user
                 echo "正在拉取 GitHub 公钥..."
-                tmp_keys=$(mktemp /tmp/vps-gh-keys.XXXXXX) || return 1
-                if curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 -o "$tmp_keys" "https://github.com/${gh_user}.keys" && [ -s "$tmp_keys" ]; then
-                    local first_key=""
-                    while IFS= read -r line || [ -n "$line" ]; do
-                        line=${line%$'\r'}
-                        if vps_ssh_valid_key "$line"; then
-                            valid_count=$((valid_count + 1))
-                            [ -z "$first_key" ] && first_key="$line"
-                        fi
-                    done < "$tmp_keys"
-                    rm -f -- "$tmp_keys"
-                    if [ "$valid_count" -gt 0 ]; then
-                        echo -e "${gl_lv}✔ 成功获取到 $valid_count 条有效公钥！${gl_bai}"
-                        auth_type="key"
-                        auth_args=(--ssh-key "$first_key")
-                        auth_display="【纯密钥登录】(已绑定 GitHub: $gh_user)"
-                    else
-                        echo "错误: 未在该 GitHub 用户主页找到合法的 SSH 公钥！" >&2
-                        break_end
-                        return 1
+                tmp_keys=$(mktemp)
+                curl -fsSL "${gh_proxy}github.com/${gh_user}.keys" -o "$tmp_keys"
+                while IFS= read -r line || [ -n "$line" ]; do
+                    line=${line%$'
+'}
+                    if vps_ssh_valid_key "$line"; then
+                        valid_count=$((valid_count + 1))
+                        # 兼容多公钥传入方式（用逗号或多条参数，根据底层重装脚本特性，多数仅取首行，但我们尽可能注入）
+                        [ -n "$line" ] && auth_args+=(--ssh-key "$line")
                     fi
+                done < "$tmp_keys"
+                rm -f -- "$tmp_keys"
+                if [ "$valid_count" -gt 0 ]; then
+                    auth_type="key"
+                    auth_display="【纯密钥登录】(已绑定 GitHub: $gh_user 共 $valid_count 把公钥)"
                 else
-                    rm -f -- "$tmp_keys"
-                    echo "错误: 无法从 GitHub 拉取公钥，请检查用户名是否正确或网络连通性！" >&2
-                    break_end
-                    return 1
+                    echo "错误: 未找到有效的公钥！" >&2; break_end; return 1
                 fi
                 ;;
             2)
-                local manual_key
-                read -r -e -p "请粘贴你的 SSH 公钥: " manual_key || return 0
-                if vps_ssh_valid_key "$manual_key"; then
-                    auth_type="key"
-                    auth_args=(--ssh-key "$manual_key")
-                    auth_display="【纯密钥登录】(手动注入公钥)"
-                else
-                    echo "错误: 输入的公钥格式不正确！" >&2
-                    break_end
-                    return 1
-                fi
-                ;;
-            3)
                 local custom_pwd
-                read -r -s -p "请输入自定义登录密码: " custom_pwd || return 0
-                while [ -z "$custom_pwd" ]; do
-                    read -r -s -p "密码不能为空，请重新输入: " custom_pwd || return 0
-                done
+                read -r -s -p "请输入自定义登录密码: " custom_pwd
                 echo
-                auth_args=(--password "$custom_pwd")
-                auth_display="密码: ${gl_huang}${custom_pwd}${gl_bai}"
+                auth_args=(--password "${custom_pwd:-root}")
+                auth_display="密码: ${gl_huang}${custom_pwd:-root}${gl_bai}"
                 ;;
-            4)
+            *)
                 local rand_pwd
-                rand_pwd=$(< /dev/urandom LC_ALL=C tr -dc 'A-Za-z0-9_' 2>/dev/null | head -c 16)
-                [ "${#rand_pwd}" -eq 16 ] || { echo "随机密码生成失败" >&2; return 1; }
+                rand_pwd=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_' | head -c 16)
                 auth_args=(--password "$rand_pwd")
                 auth_display="密码: ${gl_huang}${rand_pwd}${gl_bai}"
                 ;;
-            *) echo "凭据类型无效，请选择 1 至 4" >&2; return 1 ;;
         esac
     fi
 
-    # 端口输入
     local custom_port
-    read -r -e -p "设置远程连接端口 (回车默认 ${default_port}): " custom_port || return 0
+    read -r -p "设置远程连接端口 (回车保持当前 ${default_port}): " custom_port
     custom_port=${custom_port:-$default_port}
-    while ! vps_valid_port "$custom_port"; do
-        read -r -e -p "端口无效，请重新输入 (1-65535): " custom_port || return 0
-    done
     custom_port=$((10#$custom_port))
 
     if [ "$is_windows" = true ]; then
@@ -122,47 +85,41 @@ vps_dd_execute() {
     else
         [ "$custom_port" != "22" ] && port_args=(--ssh-port "$custom_port")
     fi
-    echo -e "生效远程端口: ${gl_huang}${custom_port}${gl_bai}"
 
     echo "--------------------------------------------------------"
     echo -e "重装后登录信息汇总："
     echo -e "用户名:   ${gl_lv}${default_user}${gl_bai}"
     echo -e "认证方式: ${auth_display}"
-    echo -e "远程端口: ${gl_lv}${custom_port}${gl_bai} (新系统开机直接生效)"
+    echo -e "远程端口: ${gl_lv}${custom_port}${gl_bai}"
     echo "--------------------------------------------------------"
-    [ "$auth_type" = "password" ] && echo -e "${gl_hong}请务必截图或保存上方密码！${gl_bai}"
-    read -r -e -p "确认现在开始重装服务器吗？(输入 yes 确认): " confirm || return 0
-    if [ "$confirm" != "yes" ]; then
-        echo "操作已取消。"
-        break_end
-        return
-    fi
+    [ "$auth_type" = "password" ] && echo -e "${gl_hong}请务必保存上方密码！${gl_bai}"
+    
+    read -r -p "确认执行重装？(Y/N): " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "已取消"; break_end; return 0; }
 
     echo -e "${gl_kjlan}正在准备底层重装环境...${gl_bai}"
     local reinstall_sh
-    reinstall_sh=$(mktemp /tmp/reinstall.XXXXXX.sh) || return 1
-    if curl -fsSL --proto '=https' --proto-redir '=https' --max-time 120 --connect-timeout 15 -o "$reinstall_sh" "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh" && [ -s "$reinstall_sh" ] && bash -n "$reinstall_sh"; then
+    reinstall_sh=$(mktemp)
+    if curl -fsSL "${gh_proxy}raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh" -o "$reinstall_sh"; then
         read -r -a os_args <<< "$os_cmd"
-        final_cmd=(bash "$reinstall_sh" "${os_args[@]}" --user "$default_user" "${auth_args[@]}" "${port_args[@]}")
-        "${final_cmd[@]}"
-        local rc=$?
-        rm -f -- "$reinstall_sh"
-        if [ "$rc" -eq 0 ]; then
-            echo -e "${gl_lv}重装环境准备完毕，服务器即将重启进入自动化安装流程...${gl_bai}"
-            echo -e "预计耗时 5~15 分钟，请耐心等待后使用端口 ${gl_huang}${custom_port}${gl_bai} 尝试登录！"
-            sleep 3
-            reboot
+        # 修正 DD 镜像不接受 user/password 的问题
+        if [[ "$os_cmd" == dd\ --img* ]]; then
+            final_cmd=(bash "$reinstall_sh" "${os_args[@]}" "${port_args[@]}")
         else
-            echo "重装脚本执行中断，请检查上方日志输出！" >&2
-            break_end
+            final_cmd=(bash "$reinstall_sh" "${os_args[@]}" --user "$default_user" "${auth_args[@]}" "${port_args[@]}")
+        fi
+        
+        "${final_cmd[@]}"
+        if [ $? -eq 0 ]; then
+            echo -e "${gl_lv}准备完毕，服务器将自动重启安装...${gl_bai}"
+            sleep 3; reboot
+        else
+            echo "重装脚本执行失败！" >&2; break_end
         fi
     else
-        rm -f -- "$reinstall_sh"
-        echo "下载重装脚本失败，请检查网络连通性！" >&2
-        break_end
+        echo "下载重装脚本失败！" >&2; break_end
     fi
 }
-
 vps_dd_menu() {
     root_use || return
     while true; do
