@@ -26,8 +26,14 @@ current_timezone() {
 }
 
 linux_info() {
-    clear
-    echo -e "${gl_kjlan}正在查询系统信息...${gl_bai}"
+    local plain=0
+    if [ "${1:-}" = "--plain" ] || [ "${1:-}" = "-p" ]; then
+        plain=1
+    fi
+    if [ "$plain" -eq 0 ]; then
+        clear
+        echo -e "${gl_kjlan}正在查询系统信息...${gl_bai}"
+    fi
 
     local ipv4_address ipv6_address output rx tx
     local cpu_info cpu_usage cpu_cores cpu_freq mem_info swap_info disk_info
@@ -39,8 +45,7 @@ linux_info() {
     tmp_ip=$(mktemp /tmp/vps_ip.XXXXXX)
     (
         ip_address
-        echo "ipv4_address='$ipv4_address'" > "$tmp_ip"
-        echo "ipv6_address='$ipv6_address'" >> "$tmp_ip"
+        printf '%s\n%s\n' "$ipv4_address" "$ipv6_address" > "$tmp_ip"
     ) &
     local ip_pid=$!
 
@@ -57,8 +62,11 @@ linux_info() {
     cpu_usage=$(awk '{idle=$5+$6; total=0; for(i=2;i<=9;i++)total+=$i; if(NR==1){idle1=idle; total1=total;} else {dt=total-total1; printf "%.0f\n", (dt>0 ? (dt-(idle-idle1))*100/dt : 0)}}' \
         <(grep 'cpu ' /proc/stat) <(sleep 1; grep 'cpu ' /proc/stat))
 
-    wait $ip_pid
-    source "$tmp_ip" 2>/dev/null || true
+    wait "$ip_pid" 2>/dev/null || true
+    {
+        IFS= read -r ipv4_address || true
+        IFS= read -r ipv6_address || true
+    } < "$tmp_ip"
     rm -f -- "$tmp_ip"
 
 
@@ -89,7 +97,7 @@ linux_info() {
     fi
 
     # 3. 基础系统参数
-    disk_info=$(df -h | awk '$NF=="/"{printf "%s/%s (%s)", $3, $2, $5}')
+    disk_info=$(df -Ph | awk '$NF=="/"{printf "%s/%s (%s)", $3, $2, $5}')
     os_info=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d '=' -f2 | tr -d '"')
     kernel=$(uname -r)
     hostname=$(uname -n)
@@ -106,6 +114,31 @@ linux_info() {
     dns_servers=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
 
     output_status
+
+    if [ "$plain" -eq 1 ]; then
+        printf 'hostname: %s\n' "$hostname"
+        printf 'os: %s\n' "$os_info"
+        printf 'kernel: %s\n' "$kernel"
+        printf 'arch: %s\n' "$(uname -m)"
+        printf 'cpu: %s\n' "$cpu_info"
+        printf 'cpu_cores: %s\n' "$cpu_cores"
+        printf 'cpu_freq: %s\n' "$cpu_freq"
+        printf 'cpu_usage: %s%%\n' "$cpu_usage"
+        printf 'load: %s\n' "$load"
+        printf 'memory: %s\n' "$mem_info"
+        printf 'swap: %s\n' "$swap_info"
+        printf 'disk: %s\n' "$disk_info"
+        printf 'connections: tcp=%s udp=%s\n' "$tcp_conn" "$udp_conn"
+        printf 'traffic: rx=%s tx=%s\n' "$rx" "$tx"
+        printf 'tcp_cc: %s %s\n' "$congestion" "$queue"
+        [ -n "$ipv4_address" ] && printf 'ipv4: %s\n' "$ipv4_address"
+        [ -n "$ipv6_address" ] && printf 'ipv6: %s\n' "$ipv6_address"
+        [ -n "$dns_servers" ]  && printf 'dns: %s\n' "$dns_servers"
+        printf 'timezone: %s\n' "$timezone"
+        printf 'time: %s\n' "$current_time"
+        printf 'uptime: %s\n' "$uptime_str"
+        return 0
+    fi
 
     clear
     echo -e "${gl_kjlan}==================== 系统信息 ====================${gl_bai}"

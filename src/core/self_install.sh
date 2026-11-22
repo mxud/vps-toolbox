@@ -61,3 +61,50 @@ vps_self_install() {
     [ "$shortcut_path" = "$VPS_INSTALL_PATH" ] || ln -sfnT "$VPS_INSTALL_PATH" "$shortcut_path"
 }
 
+vps_uninstall() {
+    clear
+    echo -e "${gl_hong}卸载 VPS 工具箱${gl_bai}"
+    echo "------------------------"
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "需要 root 权限才能卸载" >&2
+        break_end
+        return 1
+    fi
+    echo "将移除工具箱本体、备份、快捷软链及更新源记录："
+    echo "  - $VPS_INSTALL_PATH"
+    echo "  - ${VPS_INSTALL_PATH}.bak（如存在）"
+    echo "  - $(dirname -- "$VPS_INSTALL_PATH") 下指向工具箱的所有快捷软链"
+    echo "  - /etc/vps-toolbox.repo（如存在）"
+    echo "已安装的第三方服务与系统配置（Docker/Caddy/Tailscale/SSH/BBR 等）不会被删除。"
+    echo "------------------------"
+    local confirm install_dir link removed_links=0
+    read -r -p "输入 UNINSTALL 确认卸载: " confirm || return 0
+    if [ "$confirm" != UNINSTALL ]; then
+        echo "已取消卸载"
+        break_end
+        return 0
+    fi
+
+    install_dir=$(dirname -- "$VPS_INSTALL_PATH")
+    shopt -s nullglob
+    for link in "$install_dir"/*; do
+        if [ -L "$link" ] && [ "$(readlink "$link" 2>/dev/null || true)" = "$VPS_INSTALL_PATH" ]; then
+            rm -f -- "$link" && removed_links=$((removed_links + 1))
+        fi
+    done
+    shopt -u nullglob
+
+    if [ -f "${VPS_INSTALL_PATH}.bak" ] && [ ! -L "${VPS_INSTALL_PATH}.bak" ]; then
+        rm -f -- "${VPS_INSTALL_PATH}.bak"
+    fi
+    if [ -f /etc/vps-toolbox.repo ] && [ ! -L /etc/vps-toolbox.repo ]; then
+        rm -f -- /etc/vps-toolbox.repo
+    fi
+    if [ -f "$VPS_INSTALL_PATH" ] && [ ! -L "$VPS_INSTALL_PATH" ]; then
+        rm -f -- "$VPS_INSTALL_PATH"
+    fi
+
+    echo -e "${gl_lv}VPS 工具箱已卸载干净${gl_bai}（共移除 ${removed_links} 个快捷软链）。"
+    exit 0
+}
+

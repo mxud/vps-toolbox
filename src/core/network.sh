@@ -79,7 +79,13 @@ vps_set_ip_preference() {
 
 ip_address() {
     # 外部获取，移除容易取到 NAT 内部 IP 的路由判断
-    ipv4_address=$(curl -s --max-time 2 ipv4.ip.sb -q 2>/dev/null || curl -s --max-time 2 https://ipinfo.io/ip 2>/dev/null)
-    ipv6_address=$(curl -s --max-time 2 https://v6.ipinfo.io/ip 2>/dev/null)
+    local v4 v6
+    v4=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipv4.ip.sb 2>/dev/null ||
+         curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipinfo.io/ip 2>/dev/null || true)
+    v6=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://v6.ipinfo.io/ip 2>/dev/null || true)
+    v4=$(printf '%s' "$v4" | tr -d '[:space:]')
+    v6=$(printf '%s' "$v6" | tr -d '[:space:]')
+    [[ "$v4" =~ ^[0-9.]+$ ]] && ipv4_address="$v4" || ipv4_address=""
+    [[ "$v6" =~ ^[0-9A-Fa-f:.]+$ ]] && ipv6_address="$v6" || ipv6_address=""
 }
 

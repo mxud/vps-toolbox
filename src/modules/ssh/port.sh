@@ -70,6 +70,9 @@ change_ssh_port() {
                 return 1
             fi
             echo -e "${gl_lv}SSH 已在端口 $new_port 监听${gl_bai}；备份: $backup"
+            if declare -F vps_f2b_sync_port >/dev/null 2>&1; then
+                vps_f2b_sync_port "$new_port" || true
+            fi
             echo "请确认云服务商安全组/防火墙已放行新端口，并在断开当前连接前新建连接测试。"
             echo "已保留 sshd_config.d 中的配置；其中的 Port 设置也可能继续生效。"
             break_end

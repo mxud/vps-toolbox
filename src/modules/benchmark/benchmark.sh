@@ -9,7 +9,7 @@ linux_test() {
         echo "2. 流媒体服务解锁检测 (RegionRestrictionCheck)"
         echo ""
         echo -e "${gl_huang}【 网络线路与测速 】${gl_bai}"
-        echo "3. BestTrace 三网回程延迟路由"
+        echo "3. 三网回程路由追踪 (MTR Trace)"
         echo "4. 三网回程多路线检测 (backtrace)"
         echo "5. 泰尔网速三网测速 (TaiErSpeedtest)"
         echo "6. TCP 重传率与网络质量探测 (TcpQuality)"
@@ -27,18 +27,18 @@ linux_test() {
         read -r -e -p "请输入你的选择: " choice || return 0
 
         case $choice in
-            1)  run_remote_bash ${gh_proxy}raw.githubusercontent.com/xykt/IPQuality/main/ip.sh ;;
-            2)  run_remote_bash ${gh_proxy}github.com/lmc999/RegionRestrictionCheck/raw/main/check.sh ;;
-            3)  run_remote_bash "https://git.io/besttrace" ;;
-            4)  run_remote_bash ${gh_proxy}raw.githubusercontent.com/zhanghanyun/backtrace/main/install.sh ;;
+            1)  run_remote_bash "${gh_proxy}raw.githubusercontent.com/xykt/IPQuality/main/ip.sh" ;;
+            2)  run_remote_bash "${gh_proxy}github.com/lmc999/RegionRestrictionCheck/raw/main/check.sh" ;;
+            3)  run_remote_bash "${gh_proxy}raw.githubusercontent.com/zhucaidan/mtr_trace/main/mtr_trace.sh" ;;
+            4)  run_remote_bash "${gh_proxy}raw.githubusercontent.com/zhanghanyun/backtrace/main/install.sh" ;;
             5)  run_remote_bash "${gh_proxy}raw.githubusercontent.com/MiaM1ku/taierspeedtest/main/taierspeedtest.sh" ;;
             6)  run_remote_bash "${gh_proxy}raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh" ;;
-            7)  check_swap; run_remote_bash https://yabs.sh -i -5 ;;
+            7)  check_swap; run_remote_bash "https://yabs.sh" -i -5 ;;
             8)  check_swap; run_remote_bash "${gh_proxy}raw.githubusercontent.com/xykt/HardwareQuality/main/hq.sh" ;;
-            9)  run_remote_bash ${gh_proxy}github.com/spiritLHLS/ecs/raw/main/ecs.sh ;;
+            9)  run_remote_bash "${gh_proxy}github.com/spiritLHLS/ecs/raw/main/ecs.sh" ;;
             10) run_remote_bash "https://run.NodeQuality.com" ;;
             0)  break ;;
-            *)  echo "无效选择" ; sleep 1 ;;
+            *)  echo "无效选择" ; sleep 1 ; continue ;;
         esac
         break_end
     done

@@ -94,7 +94,7 @@ docker_container_menu() {
         docker ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}"
         echo ""
         echo "1. 启动容器    2. 停止容器    3. 删除容器    4. 重启容器"
-        echo "5. 进入容器    6. 查看日志    7. 查看占用"
+        echo "5. 进入容器    6. 查看日志    7. 查看占用    8. 拉取最新镜像"
         echo "0. 返回"
         echo "------------------------"
         read -r -e -p "请输入你的选择: " choice || return 0
@@ -118,12 +118,110 @@ docker_container_menu() {
                     fi
                 fi
                 ;;
-            6) read -r -e -p "容器名: " name || return 0; [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && docker logs "$name"; break_end ;;
+            6)
+                read -r -e -p "容器名: " name || return 0
+                if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+                    local log_mode
+                    read -r -e -p "日志模式 [1: 最近200行(默认) / 2: 实时追踪 -f]: " log_mode || return 0
+                    if [ "$log_mode" = "2" ]; then
+                        echo "按 Ctrl+C 退出实时日志..."
+                        docker logs -f --tail 100 "$name" || true
+                    else
+                        docker logs --tail 200 "$name"
+                    fi
+                fi
+                break_end
+                ;;
             7) docker stats --no-stream; break_end ;;
+            8)
+                read -r -e -p "容器名: " name || return 0
+                if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+                    local img
+                    img=$(docker inspect --format='{{.Config.Image}}' "$name" 2>/dev/null || true)
+                    if [ -n "$img" ]; then
+                        echo "正在拉取最新镜像: $img"
+                        docker pull "$img"
+                        echo "拉取完成；如需生效请通过原 compose/run 方式重建容器。"
+                    else
+                        echo "未找到容器: $name" >&2
+                    fi
+                fi
+                break_end
+                ;;
             0) break ;;
             *) echo "无效选择" ; sleep 1 ;;
         esac
     done
+}
+
+docker_configure_daemon() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local config=/etc/docker/daemon.json backup="" candidate max_size max_file mirror
+    [ ! -L "$config" ] || { echo "拒绝覆盖 daemon.json 符号链接" >&2; return 1; }
+    mkdir -p /etc/docker || return 1
+
+    if [ -f "$config" ]; then
+        echo "当前 /etc/docker/daemon.json 内容："
+        cat "$config"
+        echo "------------------------"
+    fi
+
+    read -r -e -p "单日志文件上限 max-size [默认 20m]: " max_size || return 0
+    max_size="${max_size:-20m}"
+    [[ "$max_size" =~ ^[0-9]+[kmgKMG]$ ]] || { echo "max-size 格式无效（如 20m / 50m）" >&2; return 1; }
+
+    read -r -e -p "日志轮转保留份数 max-file [默认 3]: " max_file || return 0
+    max_file="${max_file:-3}"
+    [[ "$max_file" =~ ^[1-9][0-9]?$ ]] || { echo "max-file 需为 1-99 的整数" >&2; return 1; }
+
+    read -r -e -p "镜像加速地址 (HTTPS，留空则不配置): " mirror || return 0
+    if [ -n "$mirror" ]; then
+        [[ "$mirror" =~ ^https://[A-Za-z0-9._:/-]+$ ]] || { echo "镜像加速地址必须为有效的 HTTPS URL" >&2; return 1; }
+    fi
+
+    if [ -f "$config" ]; then
+        backup="/etc/docker/daemon.json.vps-backup-$(date +%Y%m%d-%H%M%S)"
+        cp -p -- "$config" "$backup" || return 1
+    fi
+
+    candidate=$(mktemp /etc/docker/.daemon.json.vps.XXXXXX) || return 1
+    if [ -n "$mirror" ]; then
+        cat > "$candidate" <<EOF
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "${max_size}",
+    "max-file": "${max_file}"
+  },
+  "registry-mirrors": [
+    "${mirror}"
+  ]
+}
+EOF
+    else
+        cat > "$candidate" <<EOF
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "${max_size}",
+    "max-file": "${max_file}"
+  }
+}
+EOF
+    fi
+
+    chmod 644 "$candidate" && mv -f -- "$candidate" "$config" || { rm -f -- "$candidate"; return 1; }
+    if ! restart docker; then
+        echo "Docker 重启失败，正在恢复原配置..." >&2
+        if [ -n "$backup" ] && [ -f "$backup" ]; then
+            cp -p -- "$backup" "$config" && restart docker || true
+        else
+            rm -f -- "$config" && restart docker || true
+        fi
+        return 1
+    fi
+    echo -e "${gl_lv}Docker daemon.json 已更新并生效${gl_bai}${backup:+（旧配置备份: $backup）}"
+    echo "提示：日志轮转限制对新建容器生效。"
 }
 
 docker_menu() {
@@ -139,6 +237,7 @@ docker_menu() {
         echo "5. 清理停止的容器/无用镜像/网络（保留卷）"
         echo "6. 卸载 Docker"
         echo "7. 单独清理未使用的匿名数据卷"
+        echo "8. 配置日志轮转与镜像加速 (daemon.json)"
         echo "0. 返回主菜单"
         echo -e "${gl_kjlan}------------------------${gl_bai}"
         read -r -e -p "请输入你的选择: " choice || return 0
@@ -171,6 +270,7 @@ docker_menu() {
                 if [ "$confirm" = DELETE ]; then docker volume prune -f; fi
                 break_end
                 ;;
+            8) docker_configure_daemon ; break_end ;;
             6)
                 read -r -e -p "$(echo -e "${gl_hong}确定卸载 Docker 吗？(Y/N): ${gl_bai}")" confirm || return 0
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then

@@ -45,28 +45,46 @@ caddy_apply() {
     if ! caddy validate --config "$CADDY_MAIN" --adapter caddyfile; then
         echo '配置校验失败，正在恢复备份...'; caddy_restore_snapshot; return 1
     fi
-    if ! systemctl reload caddy; then
+    if ! service_action reload caddy; then
         echo '重载失败，正在恢复备份...'
         caddy_restore_snapshot
-        systemctl reload caddy || true
+        service_action reload caddy || true
         return 1
     fi
     echo 'Caddy 配置已生效。'
 }
 caddy_install() {
     caddy_need_root || return 1
-    command -v apt-get >/dev/null 2>&1 || { echo '当前仅支持 Debian / Ubuntu 的官方 APT 安装方式。'; return 1; }
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update && apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg || return 1
-    local tmp
-    tmp=$(mktemp) || return 1
-    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' -o "$tmp" || { rm -f "$tmp"; return 1; }
-    gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg "$tmp" || { rm -f "$tmp"; return 1; }
-    rm -f "$tmp"
-    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o /etc/apt/sources.list.d/caddy-stable.list || return 1
-    chmod a+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
-    apt-get update && apt-get install -y caddy || return 1
-    systemctl enable --now caddy && caddy version
+    if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update && apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg || return 1
+        local tmp
+        tmp=$(mktemp) || return 1
+        curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' -o "$tmp" || { rm -f "$tmp"; return 1; }
+        gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg "$tmp" || { rm -f "$tmp"; return 1; }
+        rm -f "$tmp"
+        curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o /etc/apt/sources.list.d/caddy-stable.list || return 1
+        chmod a+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
+        apt-get update && apt-get install -y caddy || return 1
+    elif command -v dnf >/dev/null 2>&1; then
+        if command -v caddy >/dev/null 2>&1; then
+            dnf upgrade -y caddy || return 1
+        else
+            dnf install -y 'dnf-command(copr)' && dnf copr enable -y @caddy/caddy && dnf install -y caddy || return 1
+        fi
+    elif command -v apk >/dev/null 2>&1; then
+        apk update || return 1
+        if command -v caddy >/dev/null 2>&1; then
+            apk upgrade caddy || return 1
+        else
+            apk add caddy || return 1
+        fi
+    else
+        echo '当前仅支持 Debian/Ubuntu (apt)、RHEL/Rocky/Alma/Fedora (dnf) 与 Alpine (apk) 自动安装 Caddy。'
+        return 1
+    fi
+    enable caddy || true
+    start caddy && caddy version
 }
 caddy_add() {
     local mode=$1 domain upstream port ip sni filename
@@ -123,18 +141,6 @@ caddy_delete() {
     [[ $answer == DELETE ]] || return 0
     caddy_snapshot && rm -- "$f" && caddy_apply
 }
-caddy_view() {
-    caddy_prepare || return 1
-    caddy fmt "$CADDY_MAIN" || return 1
-    echo '========== /etc/caddy/Caddyfile =========='
-    local f
-    for f in "$CADDY_SITES"/*.caddy; do
-        [[ -f $f ]] || continue
-        caddy fmt "$f" || return 1
-        echo "========== $f =========="
-        caddy fmt "$f"
-    done
-}
 caddy_reset() {
     caddy_prepare || return 1
     echo '此操作将清空 Caddyfile 和所有 sites/*.caddy 配置，保留备份。'
@@ -145,19 +151,6 @@ caddy_reset() {
     local f
     for f in "$CADDY_SITES"/*.caddy; do [[ -f $f ]] && rm -- "$f"; done
     caddy_apply
-}
-caddy_uninstall() {
-    caddy_need_root || return 1
-    command -v apt-get >/dev/null 2>&1 || { echo '当前仅支持通过 APT 卸载 Caddy'; return 1; }
-    echo '危险：将卸载 Caddy，并删除 /etc/caddy 中的全部配置（包括非本工具管理的配置）。'
-    read -r -p '输入 UNINSTALL 确认：' answer || return 1
-    [[ $answer == UNINSTALL ]] || return 0
-    local dest="/root/caddy-backup-$(date +%Y%m%d-%H%M%S)-$$.tar.gz"
-    [[ ! -d /etc/caddy ]] || tar -C /etc -czf "$dest" caddy || return 1
-    systemctl disable --now caddy 2>/dev/null || true
-    apt-get remove -y caddy || return 1
-    rm -rf -- /etc/caddy
-    echo "Caddy 已卸载；配置备份（如果存在）: $dest"
 }
 caddy_list() {
     caddy_need_root && caddy_need_binary || return 1
@@ -193,7 +186,7 @@ caddy_check_reload() {
     shopt -u nullglob
     for f in "${files[@]}"; do caddy fmt --overwrite "$f" || return 1; done
     caddy validate --config "$CADDY_MAIN" --adapter caddyfile || return 1
-    systemctl reload caddy || { echo '重载失败，请检查 systemctl status caddy 和 journalctl -u caddy'; return 1; }
+    service_action reload caddy || { echo '重载失败，请检查 Caddy 服务状态与日志'; return 1; }
     echo '格式检查、配置校验和重载均已完成。'
 }
 
@@ -383,11 +376,11 @@ caddy_import_migration() {
         caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"
         return 1
     fi
-    if ! systemctl reload caddy; then
+    if ! service_action reload caddy; then
         echo '重载失败，正在恢复导入前状态。' >&2
         caddy_restore_snapshot || echo '警告：Caddy 配置快照恢复失败。' >&2
         [[ -z $rollback_dir ]] || caddy_migration_restore_data "$rollback_dir" || echo '警告：证书数据恢复失败。' >&2
-        systemctl reload caddy || true
+        service_action reload caddy || true
         caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"
         return 1
     fi
@@ -416,7 +409,7 @@ caddy_add_menu() {
 }
 
 caddy_menu() {
-    local choice
+    local choice answer
     while true; do
         clear
         printf '\033[36m============================\n  Caddy 管理\n============================\033[0m\n'
@@ -436,8 +429,21 @@ caddy_menu() {
                 echo '将卸载 Caddy 软件包，但保留 /etc/caddy 配置和证书数据，方便之后迁移或重新安装。'
                 read -r -p '输入 UNINSTALL 确认：' answer || return 0
                 if [[ $answer == UNINSTALL ]]; then
-                    systemctl disable --now caddy 2>/dev/null || true
-                    if command -v apt-get >/dev/null 2>&1; then apt-get remove -y caddy; else echo '当前仅支持通过 APT 卸载 Caddy'; fi
+                    service_action stop caddy 2>/dev/null || true
+                    if [ -d /run/systemd/system ]; then
+                        systemctl disable caddy 2>/dev/null || true
+                    elif command -v rc-update >/dev/null 2>&1; then
+                        rc-update del caddy default 2>/dev/null || true
+                    fi
+                    if command -v apt-get >/dev/null 2>&1; then
+                        apt-get remove -y caddy
+                    elif command -v dnf >/dev/null 2>&1; then
+                        dnf remove -y caddy
+                    elif command -v apk >/dev/null 2>&1; then
+                        apk del caddy
+                    else
+                        echo '当前系统暂不支持自动卸载 Caddy，请使用对应包管理器手动卸载'
+                    fi
                 fi
                 break_end ;;
             0) return 0 ;;

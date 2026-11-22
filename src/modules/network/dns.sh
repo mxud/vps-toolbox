@@ -83,14 +83,19 @@ vps_dns_test() {
 }
 
 vps_dns_apply() {
-    local first_v4="$1" second_v4="$2" first_v6="${3:-}" second_v6="${4:-}"
+    local first_v4="${1:-}" second_v4="${2:-}" first_v6="${3:-}" second_v6="${4:-}"
     local mode backup previous candidate config dns_list=""
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
 
-    vps_dns_valid_ipv4 "$first_v4" && vps_dns_valid_ipv4 "$second_v4" || {
+    vps_dns_valid_ipv4 "$first_v4" || {
         echo "请输入有效的 IPv4 DNS 地址" >&2; return 1
     }
-    dns_list="$first_v4 $second_v4"
+    dns_list="$first_v4"
+
+    if [ -n "$second_v4" ]; then
+        vps_dns_valid_ipv4 "$second_v4" || { echo "请输入有效的备用 IPv4 DNS 地址: $second_v4" >&2; return 1; }
+        dns_list="$dns_list $second_v4"
+    fi
 
     if [ -n "$first_v6" ]; then
         vps_dns_valid_ipv6 "$first_v6" || { echo "输入的 IPv6 DNS 格式不正确: $first_v6" >&2; return 1; }

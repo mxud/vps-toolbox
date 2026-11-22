@@ -22,8 +22,10 @@ vps_menu() {
         echo -e "${gl_kjlan}8.${gl_bai}   测试脚本合集"
         echo -e "${gl_kjlan}9.${gl_bai}   系统工具"
         echo -e "${gl_kjlan}10.${gl_bai}  Caddy 管理"
+        echo -e "${gl_kjlan}11.${gl_bai}  Tailscale 管理"
         echo -e "${gl_kjlan}------------------------${gl_bai}"
         echo -e "${gl_kjlan}00.${gl_bai}  脚本更新"
+        echo -e "${gl_hong}99.${gl_bai}  卸载工具箱"
         echo -e "${gl_kjlan}0.${gl_bai}   退出脚本"
         echo -e "${gl_kjlan}------------------------${gl_bai}"
         read -r -e -p "请输入你的选择: " choice || return 0
@@ -39,7 +41,9 @@ vps_menu() {
             8)  linux_test ;;
             9)  linux_settings ;;
             10) caddy_menu ;;
+            11) vps_tailscale_menu ;;
             00) vps_update ;;
+            99) vps_uninstall ;;
             0)  clear ; exit 0 ;;
             *)  echo "无效的输入" ; sleep 1 ;;
         esac

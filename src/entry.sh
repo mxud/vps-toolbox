@@ -11,18 +11,22 @@ vps_main() {
     vps_menu
   else
     case "$1" in
-        info|信息)               linux_info ;;
+        info|信息)               shift; linux_info "$@" ;;
         update|更新)             linux_update ;;
         clean|清理)              linux_clean ;;
         tools|工具)              linux_tools ;;
         docker)                  docker_menu ;;
         caddy)                   caddy_menu ;;
+        ts|tailscale)            vps_tailscale_menu ;;
         bbr)                     linux_bbr ;;
         warp)                    linux_warp ;;
         test|check|测试)         linux_test ;;
         settings|设置)           linux_settings ;;
         dd|reinstall|重装)       vps_dd_menu ;;
         sshkey|key)              vps_ssh_key_menu ;;
+        f2b|fail2ban)            vps_fail2ban_menu ;;
+        fw|firewall|防火墙)      vps_firewall_menu ;;
+        diag|disk|排查)          shift; vps_diag_menu "$@" ;;
         dns)                     vps_dns_menu ;;
         install|add|安装)        shift; pkg_install "$@" ;;
         remove|uninstall|卸载)   shift; pkg_remove "$@" ;;
@@ -36,6 +40,7 @@ vps_main() {
         enable|自启)             shift; enable "$@" ;;
         shortcut|快捷键)         vps_set_shortcut ;;
         upgrade|update-self)     vps_update ;;
+        uninstall-self|remove-self) vps_uninstall ;;
         help|-h|--help)          vps_help ;;
         *)                       vps_help ;;
     esac

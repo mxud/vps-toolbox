@@ -7,12 +7,12 @@ set_timedate() {
     }
     [ -f "/usr/share/zoneinfo/$tz" ] || pkg_install tzdata || return 1
     [ -f "/usr/share/zoneinfo/$tz" ] || { echo "找不到时区: $tz" >&2; return 1; }
-    if [ -f /etc/alpine-release ]; then
+    if [ -d /run/systemd/system ] && command -v timedatectl >/dev/null 2>&1; then
+        timedatectl set-timezone "$tz" || return 1
+    else
         [ ! -L /etc/timezone ] || { echo "拒绝覆盖 timezone 符号链接" >&2; return 1; }
         ln -sfnT "/usr/share/zoneinfo/$tz" /etc/localtime || return 1
         printf '%s\n' "$tz" > /etc/timezone || return 1
-    else
-        timedatectl set-timezone "$tz" || return 1
     fi
     echo -e "${gl_lv}时区已设置为: $tz${gl_bai}"
 }
@@ -41,7 +41,7 @@ timezone_menu() {
             7) set_timedate America/Los_Angeles ;;
             8) set_timedate UTC ;;
             0) break ;;
-            *) echo "无效选择" ; sleep 1 ;;
+            *) echo "无效选择" ; sleep 1 ; continue ;;
         esac
         break_end
     done

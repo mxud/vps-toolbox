@@ -10,5 +10,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and smoke test
         run: bash tests/smoke.sh
+      - name: ShellCheck lint
+        run: |
+          shellcheck -S error dist/vps-toolbox.sh install.sh build/build.sh tests/smoke.sh
+          shellcheck -S warning dist/vps-toolbox.sh || true
       - name: Ensure release script is committed and current
         run: git diff --exit-code -- dist/vps-toolbox.sh

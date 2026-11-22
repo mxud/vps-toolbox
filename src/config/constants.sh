@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ============================================================
 
-sh_v="0.1.2"
+sh_v="0.2.0"
 
 # ============ 颜色定义 ============
 gl_hui='\e[37m'
@@ -19,6 +19,7 @@ gl_kjlan='\033[96m'
 # ============ 基础配置 ============
 VPS_INSTALL_PATH="/usr/local/bin/vps-toolbox"
 VPS_DEFAULT_SHORTCUT="vps"
+gh_proxy="${VPS_GITHUB_PROXY:-https://}"
 VPS_UPDATE_URL="${VPS_UPDATE_URL:-}"
 # Installer writes a repository identifier to allow `vps upgrade` without
 # requiring an environment variable on every run. Can be overridden explicitly.
@@ -28,5 +29,4 @@ if [ -z "$VPS_UPDATE_URL" ] && [ -r /etc/vps-toolbox.repo ]; then
         VPS_UPDATE_URL="${gh_proxy}raw.githubusercontent.com/${vps_repo}/main/dist/vps-toolbox.sh"
     fi
 fi
-gh_proxy="${VPS_GITHUB_PROXY:-https://}"
 
