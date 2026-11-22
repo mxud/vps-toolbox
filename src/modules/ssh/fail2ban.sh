@@ -27,28 +27,16 @@ vps_f2b_sync_port() {
     echo -e "${gl_lv}已同步更新 Fail2ban SSH 监控端口为 ${new_port}${gl_bai}"
 }
 
-vps_f2b_install_setup() {
+vps_f2b_apply_config() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
-    local detected_port ssh_port maxretry bantime findtime backend="auto" candidate
-    detected_port=$(vps_fw_ssh_port)
+    local ssh_port="$1" maxretry="${2:-5}" findtime="${3:-10m}" bantime="${4:-1h}"
+    local backend="auto" candidate
 
-    read -r -e -p "SSH 监控端口 (回车使用检测值 ${detected_port}，多端口用逗号分隔如 22,57140): " ssh_port || return 0
-    ssh_port="${ssh_port:-$detected_port}"
-    ssh_port="${ssh_port// /}"
     vps_f2b_valid_ports "$ssh_port" || { echo "端口格式无效: $ssh_port" >&2; return 1; }
-
-    read -r -e -p "最大失败次数 maxretry [默认 5]: " maxretry || return 0
-    maxretry="${maxretry:-5}"
     [[ "$maxretry" =~ ^[0-9]+$ ]] && ((10#$maxretry >= 1 && 10#$maxretry <= 50)) || {
         echo "maxretry 需为 1-50 的整数" >&2; return 1
     }
-
-    read -r -e -p "检测时间窗口 findtime [默认 10m]: " findtime || return 0
-    findtime="${findtime:-10m}"
     [[ "$findtime" =~ ^[0-9]+[smhdw]?$ ]] || { echo "findtime 格式无效（如 10m / 1h）" >&2; return 1; }
-
-    read -r -e -p "封禁时长 bantime [默认 1h]: " bantime || return 0
-    bantime="${bantime:-1h}"
     [[ "$bantime" =~ ^-?[0-9]+[smhdw]?$ ]] || { echo "bantime 格式无效（如 1h / 1d / -1）" >&2; return 1; }
 
     if ! command -v fail2ban-client >/dev/null 2>&1; then
@@ -90,6 +78,27 @@ EOF
     sleep 1
     echo -e "${gl_lv}Fail2ban SSH 防爆破已启用${gl_bai}（端口: ${ssh_port}, maxretry=${maxretry}, findtime=${findtime}, bantime=${bantime}）"
     fail2ban-client status sshd 2>/dev/null || true
+}
+
+vps_f2b_install_setup() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local detected_port ssh_port maxretry bantime findtime
+    detected_port=$(vps_fw_ssh_port)
+
+    read -r -e -p "SSH 监控端口 (回车使用检测值 ${detected_port}，多端口用逗号分隔如 22,57140): " ssh_port || return 0
+    ssh_port="${ssh_port:-$detected_port}"
+    ssh_port="${ssh_port// /}"
+
+    read -r -e -p "最大失败次数 maxretry [默认 5]: " maxretry || return 0
+    maxretry="${maxretry:-5}"
+
+    read -r -e -p "检测时间窗口 findtime [默认 10m]: " findtime || return 0
+    findtime="${findtime:-10m}"
+
+    read -r -e -p "封禁时长 bantime [默认 1h]: " bantime || return 0
+    bantime="${bantime:-1h}"
+
+    vps_f2b_apply_config "$ssh_port" "$maxretry" "$findtime" "$bantime"
 }
 
 vps_f2b_unban() {

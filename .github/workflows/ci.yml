@@ -15,4 +15,4 @@ jobs:
           shellcheck -S error dist/vps-toolbox.sh install.sh build/build.sh tests/smoke.sh
           shellcheck -S warning dist/vps-toolbox.sh || true
       - name: Ensure release script is committed and current
-        run: git diff --exit-code -- dist/vps-toolbox.sh
+        run: git diff --exit-code -- dist/vps-toolbox.sh dist/vps-toolbox.sh.sha256

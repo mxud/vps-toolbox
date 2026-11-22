@@ -9,7 +9,7 @@
 | 功能分类    | 功能说明                                       |
 | ----------- | ---------------------------------------------- |
 | 系统信息    | 查看 CPU、内存、Swap、磁盘、系统负载、网络信息（支持 `--plain` 纯文本） |
-| 系统管理    | 系统更新、软件清理、主机名与时区设置、磁盘与负载排查                    |
+| 系统管理    | 系统更新、软件清理、新机一键优化、主机名与时区设置、磁盘与负载排查      |
 | Docker 管理 | 安装、更新、容器/镜像管理、日志轮转与镜像加速、清理                     |
 | Caddy 管理  | 安装（APT/DNF/APK）、反代配置、校验重载及迁移备份/导入                  |
 | Tailscale   | 安装/升级、登录、标签 (Tags)、Exit Node、子网路由、Tailscale SSH 与诊断 |
@@ -47,6 +47,7 @@ vps sshkey          # SSH 密钥管理
 vps fail2ban        # SSH 防爆破 (Fail2ban，别名 vps f2b)
 vps firewall        # 防火墙管理 (UFW / Firewalld，别名 vps fw)
 vps diag            # 磁盘与负载排查（支持 vps diag --quick）
+vps optimize        # 新机一键优化与内核调优（别名 vps opt）
 vps dns             # DNS 管理
 vps bbr             # BBR 管理
 vps dd              # 系统重装

@@ -70,25 +70,27 @@ linux_info() {
     rm -f -- "$tmp_ip"
 
 
-    # 2. 内存与 Swap 采集 (统一走 /proc/meminfo，精准无误)
+    # 2. 内存与 Swap 采集 (统一走 /proc/meminfo，四舍五入到 MB)
     local mem_total mem_avail mem_used mem_p
-    mem_total=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
-    mem_avail=$(awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
+    mem_total=$(awk '/MemTotal:/ {print int(($2+512)/1024)}' /proc/meminfo)
+    mem_avail=$(awk '/MemAvailable:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null)
     if [ -z "$mem_avail" ] || [ "$mem_avail" -eq 0 ]; then
         local mem_free buffers cached
-        mem_free=$(awk '/MemFree:/ {print int($2/1024)}' /proc/meminfo)
-        buffers=$(awk '/Buffers:/ {print int($2/1024)}' /proc/meminfo)
-        cached=$(awk '/^Cached:/ {print int($2/1024)}' /proc/meminfo)
+        mem_free=$(awk '/MemFree:/ {print int(($2+512)/1024)}' /proc/meminfo)
+        buffers=$(awk '/Buffers:/ {print int(($2+512)/1024)}' /proc/meminfo)
+        cached=$(awk '/^Cached:/ {print int(($2+512)/1024)}' /proc/meminfo)
         mem_avail=$((mem_free + buffers + cached))
     fi
     mem_used=$((mem_total - mem_avail))
+    [ "$mem_used" -lt 0 ] && mem_used=0
     mem_p=$(awk -v u="$mem_used" -v t="$mem_total" 'BEGIN {printf "%.1f", (t>0 ? u*100/t : 0)}')
     mem_info="${mem_used}M/${mem_total}M (${mem_p}%)"
 
     local s_total s_free s_used s_p
-    s_total=$(awk '/SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
-    s_free=$(awk '/SwapFree:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+    s_total=$(awk '/SwapTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+    s_free=$(awk '/SwapFree:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
     s_used=$((s_total - s_free))
+    [ "$s_used" -lt 0 ] && s_used=0
     if [ "${s_total:-0}" -gt 0 ]; then
         s_p=$(awk -v u="$s_used" -v t="$s_total" 'BEGIN {printf "%.1f", u*100/t}')
         swap_info="${s_used}M/${s_total}M (${s_p}%)"

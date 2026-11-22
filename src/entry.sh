@@ -27,6 +27,7 @@ vps_main() {
         f2b|fail2ban)            vps_fail2ban_menu ;;
         fw|firewall|防火墙)      vps_firewall_menu ;;
         diag|disk|排查)          shift; vps_diag_menu "$@" ;;
+        opt|optimize|优化)       vps_optimize_menu ;;
         dns)                     vps_dns_menu ;;
         install|add|安装)        shift; pkg_install "$@" ;;
         remove|uninstall|卸载)   shift; pkg_remove "$@" ;;

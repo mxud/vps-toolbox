@@ -7,7 +7,7 @@ linux_settings() {
         [ -z "$cur_port" ] && cur_port="22"
 
         local s_total
-        s_total=$(awk '/SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+        s_total=$(awk '/SwapTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
         [ "$s_total" -gt 0 ] && cur_swap="${s_total}M" || cur_swap="未开启"
 
         cur_tz=$(current_timezone)
@@ -31,19 +31,20 @@ linux_settings() {
         printf " %-3s %-20s ${gl_hui}[防爆破/封禁管理]${gl_bai}\n" "5." "SSH 安全与 Fail2ban"
         echo ""
         echo -e "${gl_huang}【 系统与环境 】${gl_bai}"
-        printf " %-3s %-20s ${gl_hui}[主机: %s]${gl_bai}\n" "6." "修改主机名" "${cur_host}"
-        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "7." "修改虚拟内存 (Swap)" "${cur_swap}"
-        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "8." "设置系统时区" "${cur_tz}"
-        printf " %-3s %-20s ${gl_hong}[纯内存在线重装]${gl_bai}\n" "9." "一键重装系统"
-        printf " %-3s %-20s\n" "10." "一键重启服务器"
-        printf " %-3s %-20s ${gl_hui}[大目录/Top 进程]${gl_bai}\n" "11." "磁盘与负载排查"
+        printf " %-3s %-20s ${gl_lv}[新机全套/内核调优]${gl_bai}\n" "6." "一键系统优化"
+        printf " %-3s %-20s ${gl_hui}[主机: %s]${gl_bai}\n" "7." "修改主机名" "${cur_host}"
+        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "8." "修改虚拟内存 (Swap)" "${cur_swap}"
+        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "9." "设置系统时区" "${cur_tz}"
+        printf " %-3s %-20s ${gl_hong}[纯内存在线重装]${gl_bai}\n" "10." "一键重装系统"
+        printf " %-3s %-20s\n" "11." "一键重启服务器"
+        printf " %-3s %-20s ${gl_hui}[大目录/Top 进程]${gl_bai}\n" "12." "磁盘与负载排查"
         echo ""
         echo -e "${gl_huang}【 网络与规则 】${gl_bai}"
-        printf " %-3s %-20s ${gl_hui}[当前: %s]${gl_bai}\n" "12." "优化 DNS 地址" "${cur_dns}"
-        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "13." "设置 IPv4 地址优先级" "${cur_ipc}"
-        printf " %-3s %-20s ${gl_lv}[UFW / Firewalld]${gl_bai}\n" "14." "防火墙管理"
-        printf " %-3s %-20s ${gl_hong}[清空 IPv4 filter 表]${gl_bai}\n" "15." "开放 IPv4 防火墙端口"
-        printf " %-3s %-20s ${gl_hui}[ss 监听列表]${gl_bai}\n" "16." "查看本机端口占用"
+        printf " %-3s %-20s ${gl_hui}[当前: %s]${gl_bai}\n" "13." "优化 DNS 地址" "${cur_dns}"
+        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "14." "设置 IPv4 地址优先级" "${cur_ipc}"
+        printf " %-3s %-20s ${gl_lv}[UFW / Firewalld]${gl_bai}\n" "15." "防火墙管理"
+        printf " %-3s %-20s ${gl_hong}[清空 IPv4 filter 表]${gl_bai}\n" "16." "开放 IPv4 防火墙端口"
+        printf " %-3s %-20s ${gl_hui}[ss 监听列表]${gl_bai}\n" "17." "查看本机端口占用"
         echo -e "${gl_kjlan}--------------------------------------------------------${gl_bai}"
         echo " 0.  返回主菜单"
         echo -e "${gl_kjlan}--------------------------------------------------------${gl_bai}"
@@ -55,25 +56,26 @@ linux_settings() {
             3) change_ssh_port ;;
             4) vps_ssh_key_menu ;;
             5) vps_fail2ban_menu ;;
-            6)
+            6) vps_optimize_menu ;;
+            7)
                 root_use || continue
                 read -r -e -p "请输入新主机名: " new_hostname || return 0
                 [ -z "$new_hostname" ] || vps_set_hostname "$new_hostname"
                 break_end
                 ;;
-            7)
+            8)
                 clear
                 echo -e "当前虚拟内存: ${gl_huang}${cur_swap}${gl_bai}"
                 read -r -e -p "输入新的 swap 大小 (MB，输入 0 退出): " swap_size || return 0
                 [ "$swap_size" != "0" ] && [ -n "$swap_size" ] && add_swap "$swap_size"
                 break_end
                 ;;
-            8) timezone_menu ;;
-            9) vps_dd_menu ;;
-            10) server_reboot ;;
-            11) vps_diag_menu ;;
-            12) vps_dns_menu ;;
-            13)
+            9) timezone_menu ;;
+            10) vps_dd_menu ;;
+            11) server_reboot ;;
+            12) vps_diag_menu ;;
+            13) vps_dns_menu ;;
+            14)
                 root_use || continue
                 clear
                 echo -e "当前优先级: ${gl_huang}${cur_ipc}${gl_bai}"
@@ -85,8 +87,8 @@ linux_settings() {
                 esac
                 break_end
                 ;;
-            14) vps_firewall_menu ;;
-            15)
+            15) vps_firewall_menu ;;
+            16)
                 root_use || continue
                 if command -v docker >/dev/null 2>&1 || command -v ufw >/dev/null 2>&1 || command -v firewall-cmd >/dev/null 2>&1; then
                     echo "检测到 Docker 或防火墙管理器，请通过对应管理器调整端口，避免破坏现有规则。"
@@ -113,7 +115,7 @@ linux_settings() {
                 fi
                 break_end
                 ;;
-            16) clear; ss -tulnape; break_end ;;
+            17) clear; ss -tulnape; break_end ;;
             0) break ;;
             *) echo "无效选择" ; sleep 1 ;;
         esac

@@ -56,50 +56,55 @@ vps_ts_up() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
     vps_ts_need_binary || return 1
 
-    local auth_key ts_host raw_tags tags use_ssh accept_routes use_exit adv_routes
+    local auth_key auth_file="" ts_host raw_tags tags use_ssh accept_routes use_exit adv_routes rc=0
     local -a args=()
 
     echo -e "${gl_kjlan}=== Tailscale 登录 / 启动配置 ===${gl_bai}"
     read -r -s -p "Auth Key (留空则使用浏览器交互式登录): " auth_key || return 0
     echo ""
     if [ -n "$auth_key" ]; then
-        args+=(--auth-key="$auth_key")
+        auth_file=$(mktemp /tmp/vps-ts-auth.XXXXXX) || return 1
+        chmod 600 "$auth_file" || { rm -f -- "$auth_file"; return 1; }
+        printf '%s\n' "$auth_key" > "$auth_file" || { rm -f -- "$auth_file"; return 1; }
+        args+=(--auth-key="file:${auth_file}")
     fi
 
-    read -r -e -p "自定义节点名称 --hostname (留空使用系统主机名): " ts_host || return 0
+    read -r -e -p "自定义节点名称 --hostname (留空使用系统主机名): " ts_host || { rm -f -- "$auth_file"; return 0; }
     if [ -n "$ts_host" ]; then
-        vps_valid_hostname "$ts_host" || { echo "节点名称格式无效" >&2; return 1; }
+        vps_valid_hostname "$ts_host" || { rm -f -- "$auth_file"; echo "节点名称格式无效" >&2; return 1; }
         args+=(--hostname="$ts_host")
     fi
 
-    read -r -e -p "节点标签 --advertise-tags (逗号分隔，如 vps,prod；留空跳过): " raw_tags || return 0
+    read -r -e -p "节点标签 --advertise-tags (逗号分隔，如 vps,prod；留空跳过): " raw_tags || { rm -f -- "$auth_file"; return 0; }
     if [ -n "$raw_tags" ]; then
-        tags=$(vps_ts_format_tags "$raw_tags") || return 1
+        tags=$(vps_ts_format_tags "$raw_tags") || { rm -f -- "$auth_file"; return 1; }
         args+=(--advertise-tags="$tags")
         echo -e "${gl_huang}提示：使用标签前请确保已在 Tailscale 控制台 ACL 的 tagOwners 中配置对应标签。${gl_bai}"
     fi
 
-    read -r -e -p "开启 Tailscale SSH？[y/N]: " use_ssh || return 0
+    read -r -e -p "开启 Tailscale SSH？[y/N]: " use_ssh || { rm -f -- "$auth_file"; return 0; }
     [[ "$use_ssh" =~ ^[Yy]$ ]] && args+=(--ssh)
 
-    read -r -e -p "接受其他节点广播的子网路由 (--accept-routes)？[y/N]: " accept_routes || return 0
+    read -r -e -p "接受其他节点广播的子网路由 (--accept-routes)？[y/N]: " accept_routes || { rm -f -- "$auth_file"; return 0; }
     [[ "$accept_routes" =~ ^[Yy]$ ]] && args+=(--accept-routes)
 
-    read -r -e -p "作为出口节点 (--advertise-exit-node)？[y/N]: " use_exit || return 0
+    read -r -e -p "作为出口节点 (--advertise-exit-node)？[y/N]: " use_exit || { rm -f -- "$auth_file"; return 0; }
     if [[ "$use_exit" =~ ^[Yy]$ ]]; then
-        vps_ts_enable_forwarding || return 1
+        vps_ts_enable_forwarding || { rm -f -- "$auth_file"; return 1; }
         args+=(--advertise-exit-node)
     fi
 
-    read -r -e -p "广播子网路由 --advertise-routes (如 10.0.0.0/24；留空跳过): " adv_routes || return 0
+    read -r -e -p "广播子网路由 --advertise-routes (如 10.0.0.0/24；留空跳过): " adv_routes || { rm -f -- "$auth_file"; return 0; }
     if [ -n "$adv_routes" ]; then
-        [[ "$adv_routes" =~ ^[0-9A-Fa-f.:/,]+$ ]] || { echo "子网路由格式无效" >&2; return 1; }
-        vps_ts_enable_forwarding || return 1
+        [[ "$adv_routes" =~ ^[0-9A-Fa-f.:/,]+$ ]] || { rm -f -- "$auth_file"; echo "子网路由格式无效" >&2; return 1; }
+        vps_ts_enable_forwarding || { rm -f -- "$auth_file"; return 1; }
         args+=(--advertise-routes="$adv_routes")
     fi
 
     echo "正在执行 tailscale up..."
-    tailscale up "${args[@]}"
+    tailscale up "${args[@]}" || rc=$?
+    [ -z "$auth_file" ] || rm -f -- "$auth_file"
+    return "$rc"
 }
 
 vps_ts_manage_options() {

@@ -1,6 +1,6 @@
 check_swap() {
     local swap_total
-    swap_total=$(awk '/SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+    swap_total=$(awk '/SwapTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
     if [ "${swap_total:-0}" -eq 0 ]; then
         echo "提示：系统未启用 swap，测试可能因内存不足而失败。" >&2
     fi

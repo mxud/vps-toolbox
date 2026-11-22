@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ============================================================
 
-sh_v="0.2.0"
+sh_v="0.2.1"
 
 # ============ 颜色定义 ============
 gl_hui='\e[37m'
@@ -434,7 +434,7 @@ ip_address() {
 # ---- BEGIN modules/system/swap.sh ----
 check_swap() {
     local swap_total
-    swap_total=$(awk '/SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+    swap_total=$(awk '/SwapTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
     if [ "${swap_total:-0}" -eq 0 ]; then
         echo "提示：系统未启用 swap，测试可能因内存不足而失败。" >&2
     fi
@@ -784,28 +784,43 @@ docker_menu() {
 
 # ---- END modules/docker/docker.sh ----
 
-# ---- BEGIN modules/caddy/caddy.sh ----
-# Caddy management module for VPS Toolbox
+# ---- BEGIN modules/caddy/common.sh ----
+# ============ Caddy 公共工具与校验 ============
+
 CADDY_MAIN=/etc/caddy/Caddyfile
 CADDY_SITES=/etc/caddy/sites
 CADDY_BACKUP=/etc/caddy/vps-toolbox-backups
 
-caddy_need_root() { [[ $EUID -eq 0 ]] || { echo '需要 root 权限'; return 1; }; }
-caddy_need_binary() { command -v caddy >/dev/null 2>&1 || { echo '请先安装 Caddy'; return 1; }; }
-caddy_domain_ok() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && $1 == *.* && $1 != *..* && ${#1} -le 253 ]]; }
+caddy_need_root() {
+    [[ $EUID -eq 0 ]] || { echo -e "${gl_huang}提示: ${gl_bai}需要 root 权限" >&2; return 1; }
+}
+
+caddy_need_binary() {
+    command -v caddy >/dev/null 2>&1 || { echo -e "${gl_huang}提示: ${gl_bai}请先安装 Caddy" >&2; return 1; }
+}
+
+caddy_domain_ok() {
+    [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && $1 == *.* && $1 != *..* && ${#1} -le 253 ]]
+}
+
 caddy_ipv4_ok() {
     local ip=$1 a b c d n
     [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
     IFS=. read -r a b c d <<< "$ip"
     for n in "$a" "$b" "$c" "$d"; do ((10#$n <= 255)) || return 1; done
 }
-caddy_port_ok() { [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+
+caddy_port_ok() {
+    [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535))
+}
+
 caddy_prepare() {
     caddy_need_root && caddy_need_binary || return 1
     mkdir -p "$CADDY_SITES" "$CADDY_BACKUP"
     [[ -f $CADDY_MAIN ]] || printf '# Managed by VPS Toolbox\nimport /etc/caddy/sites/*.caddy\n' > "$CADDY_MAIN"
     if ! grep -Eq '^[[:space:]]*import[[:space:]]+/etc/caddy/sites/\*\.caddy([[:space:]]|$)' "$CADDY_MAIN"; then
-        echo '当前 Caddyfile 尚未导入 sites/*.caddy。'
+        echo -e "${gl_huang}当前 Caddyfile 尚未导入 sites/*.caddy。${gl_bai}"
+        local confirm
         read -r -p '自动添加 import 到 Caddyfile 末尾？[y/N]: ' confirm || return 1
         [[ $confirm == [yY] ]] || return 1
         cp -a "$CADDY_MAIN" "$CADDY_BACKUP/Caddyfile.$(date +%Y%m%d%H%M%S).bak" || return 1
@@ -813,6 +828,7 @@ caddy_prepare() {
     fi
     caddy validate --config "$CADDY_MAIN" --adapter caddyfile || return 1
 }
+
 caddy_snapshot() {
     mkdir -p "$CADDY_BACKUP"
     local name
@@ -822,24 +838,65 @@ caddy_snapshot() {
     cp -a "$CADDY_SITES" "$CADDY_BACKUP/$name/sites" || return 1
     CADDY_LAST_BACKUP="$CADDY_BACKUP/$name"
 }
+
 caddy_restore_snapshot() {
     [[ -n ${CADDY_LAST_BACKUP:-} && -d $CADDY_LAST_BACKUP ]] || return 1
     cp -a "$CADDY_LAST_BACKUP/Caddyfile" "$CADDY_MAIN" || return 1
     rm -rf -- "$CADDY_SITES" || return 1
     cp -a "$CADDY_LAST_BACKUP/sites" "$CADDY_SITES"
 }
+
 caddy_apply() {
     if ! caddy validate --config "$CADDY_MAIN" --adapter caddyfile; then
-        echo '配置校验失败，正在恢复备份...'; caddy_restore_snapshot; return 1
+        echo -e "${gl_hong}配置校验失败，正在恢复备份...${gl_bai}" >&2
+        caddy_restore_snapshot
+        return 1
     fi
     if ! service_action reload caddy; then
-        echo '重载失败，正在恢复备份...'
+        echo -e "${gl_hong}重载失败，正在恢复备份...${gl_bai}" >&2
         caddy_restore_snapshot
         service_action reload caddy || true
         return 1
     fi
-    echo 'Caddy 配置已生效。'
+    echo -e "${gl_lv}Caddy 配置已生效。${gl_bai}"
 }
+
+caddy_select_site() {
+    local prompt="${1:-请输入序号或域名 (输入 0 返回): }" input idx i=1 f
+    shopt -s nullglob
+    local -a files=("$CADDY_SITES"/*.caddy)
+    shopt -u nullglob
+    ((${#files[@]})) || { echo -e "${gl_hui}当前没有反代配置${gl_bai}"; return 1; }
+    echo -e "${gl_kjlan}当前站点列表：${gl_bai}"
+    for f in "${files[@]}"; do
+        printf "  ${gl_kjlan}%d.${gl_bai} %s\n" "$i" "$(basename "$f" .caddy)"
+        i=$((i + 1))
+    done
+    read -r -e -p "$prompt" input || return 1
+    [ "$input" = "0" ] && return 2
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        idx=$((10#$input))
+        if ((idx >= 1 && idx <= ${#files[@]})); then
+            CADDY_SELECTED_FILE="${files[idx-1]}"
+            CADDY_SELECTED_DOMAIN="$(basename "$CADDY_SELECTED_FILE" .caddy)"
+            return 0
+        fi
+        echo -e "${gl_hong}序号超出范围${gl_bai}" >&2
+        return 1
+    fi
+    caddy_domain_ok "$input" || { echo -e "${gl_hong}域名格式不正确${gl_bai}" >&2; return 1; }
+    f="$CADDY_SITES/${input}.caddy"
+    [[ -f $f && ! -L $f ]] || { echo -e "${gl_hong}配置不存在: $input${gl_bai}" >&2; return 1; }
+    CADDY_SELECTED_FILE="$f"
+    CADDY_SELECTED_DOMAIN="$input"
+    return 0
+}
+
+# ---- END modules/caddy/common.sh ----
+
+# ---- BEGIN modules/caddy/service.sh ----
+# ============ Caddy 安装、服务与维护 ============
+
 caddy_install() {
     caddy_need_root || return 1
     if command -v apt-get >/dev/null 2>&1; then
@@ -867,34 +924,149 @@ caddy_install() {
             apk add caddy || return 1
         fi
     else
-        echo '当前仅支持 Debian/Ubuntu (apt)、RHEL/Rocky/Alma/Fedora (dnf) 与 Alpine (apk) 自动安装 Caddy。'
+        echo -e "${gl_hong}当前仅支持 Debian/Ubuntu (apt)、RHEL/Rocky/Alma/Fedora (dnf) 与 Alpine (apk) 自动安装 Caddy。${gl_bai}" >&2
         return 1
     fi
     enable caddy || true
-    start caddy && caddy version
+    start caddy && echo -e "${gl_lv}Caddy 已就绪: $(caddy version)${gl_bai}"
 }
-caddy_add() {
-    local mode=$1 domain upstream port ip sni filename
-    caddy_prepare || return 1
-    read -r -p '反代域名（例如 app.example.com）: ' domain || return 1
-    caddy_domain_ok "$domain" || { echo '域名格式不正确'; return 1; }
-    filename="$CADDY_SITES/${domain}.caddy"
-    [[ ! -e $filename && ! -L $filename ]] || { echo '此域名的配置文件已存在，不会覆盖'; return 1; }
-    if [[ $mode == standard ]]; then
-        read -r -p '目标地址（例如 127.0.0.1:3000 或 https://backend.example.com）: ' upstream || return 1
-        if [[ $upstream =~ ^https?://[a-zA-Z0-9.:-]+$ || $upstream =~ ^[a-zA-Z0-9.:-]+$ ]]; then :; else echo '地址格式不正确（暂不支持路径、IPv6 字面量）'; return 1; fi
+
+caddy_uninstall_keep_config() {
+    caddy_need_root || return 1
+    local answer
+    echo -e "${gl_huang}将卸载 Caddy 软件包，但保留 /etc/caddy 配置和证书数据，方便之后迁移或重新安装。${gl_bai}"
+    read -r -p '输入 UNINSTALL 确认：' answer || return 0
+    [[ $answer == UNINSTALL ]] || { echo '已取消'; return 0; }
+    service_action stop caddy 2>/dev/null || true
+    if [ -d /run/systemd/system ]; then
+        systemctl disable caddy 2>/dev/null || true
+    elif command -v rc-update >/dev/null 2>&1; then
+        rc-update del caddy default 2>/dev/null || true
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get remove -y caddy
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf remove -y caddy
+    elif command -v apk >/dev/null 2>&1; then
+        apk del caddy
     else
-        read -r -p '源站 IPv4: ' ip || return 1
-        caddy_ipv4_ok "$ip" || { echo 'IPv4 格式不正确'; return 1; }
-        read -r -p '源站 HTTPS 端口 [443]: ' port || return 1
+        echo -e "${gl_hong}当前系统暂不支持自动卸载 Caddy，请使用对应包管理器手动卸载${gl_bai}" >&2
+        return 1
+    fi
+    echo -e "${gl_lv}Caddy 已卸载（配置与证书已保留）。${gl_bai}"
+}
+
+caddy_reset() {
+    caddy_prepare || return 1
+    local answer f
+    echo -e "${gl_huang}此操作将清空 Caddyfile 和所有 sites/*.caddy 配置，保留备份。${gl_bai}"
+    read -r -p '输入 RESET 确认：' answer || return 1
+    [[ $answer == RESET ]] || { echo '已取消'; return 0; }
+    caddy_snapshot || return 1
+    printf '# Managed by VPS Toolbox\nimport /etc/caddy/sites/*.caddy\n' > "$CADDY_MAIN"
+    for f in "$CADDY_SITES"/*.caddy; do [[ -f $f ]] && rm -- "$f"; done
+    caddy_apply
+}
+
+caddy_list() {
+    caddy_need_root && caddy_need_binary || return 1
+    echo -e "${gl_kjlan}========== Caddy 服务状态 ==========${gl_bai}"
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl --no-pager --full status caddy 2>/dev/null | sed -n '1,8p' || true
+    else
+        service_action status caddy 2>/dev/null || true
+    fi
+    echo ""
+    echo -e "${gl_kjlan}========== 反代配置 ==========${gl_bai}"
+    if [[ -d $CADDY_SITES ]]; then
+        local f
+        shopt -s nullglob
+        local files=("$CADDY_SITES"/*.caddy)
+        shopt -u nullglob
+        if ((${#files[@]})); then
+            for f in "${files[@]}"; do
+                echo -e "\n${gl_huang}--- $(basename "$f") ---${gl_bai}"
+                sed -n '1,120p' "$f"
+            done
+        else
+            echo -e "${gl_hui}目前没有由工具箱管理的反代配置。${gl_bai}"
+        fi
+    else
+        echo -e "${gl_hui}站点配置目录尚不存在。${gl_bai}"
+    fi
+}
+
+caddy_check_reload() {
+    caddy_prepare || return 1
+    echo -e "${gl_kjlan}正在格式化并校验 Caddyfile...${gl_bai}"
+    caddy fmt --overwrite "$CADDY_MAIN" || return 1
+    local f
+    shopt -s nullglob
+    local files=("$CADDY_SITES"/*.caddy)
+    shopt -u nullglob
+    for f in "${files[@]}"; do caddy fmt --overwrite "$f" || return 1; done
+    caddy validate --config "$CADDY_MAIN" --adapter caddyfile || return 1
+    service_action reload caddy || { echo -e "${gl_hong}重载失败，请检查 Caddy 服务状态与日志${gl_bai}" >&2; return 1; }
+    echo -e "${gl_lv}格式检查、配置校验和重载均已完成。${gl_bai}"
+}
+
+caddy_logs() {
+    caddy_need_root && caddy_need_binary || return 1
+    local log_mode
+    if [ -d /run/systemd/system ] && command -v journalctl >/dev/null 2>&1; then
+        read -r -e -p "日志模式 [1: 最近 100 行(默认) / 2: 实时追踪 -f]: " log_mode || return 0
+        clear
+        if [ "$log_mode" = "2" ]; then
+            echo -e "${gl_huang}按 Ctrl+C 退出实时日志...${gl_bai}"
+            journalctl -u caddy -n 50 -f || true
+        else
+            journalctl -u caddy -n 100 --no-pager
+        fi
+    else
+        echo -e "${gl_hui}当前系统未使用 systemd journald，请直接查看 /var/log/caddy/ 或 OpenRC 日志。${gl_bai}"
+    fi
+}
+
+# ---- END modules/caddy/service.sh ----
+
+# ---- BEGIN modules/caddy/sites.sh ----
+# ============ Caddy 站点与反代管理 ============
+
+caddy_add() {
+    local mode=$1 domain upstream target port ip sni filename
+    caddy_prepare || return 1
+    read -r -e -p '站点域名（例如 app.example.com）: ' domain || return 1
+    caddy_domain_ok "$domain" || { echo -e "${gl_hong}域名格式不正确${gl_bai}" >&2; return 1; }
+    filename="$CADDY_SITES/${domain}.caddy"
+    [[ ! -e $filename && ! -L $filename ]] || { echo -e "${gl_huang}此域名的配置文件已存在，不会覆盖（请使用编辑功能）${gl_bai}" >&2; return 1; }
+    if [[ $mode == standard ]]; then
+        read -r -e -p '目标地址（直接输入端口号如 3000 将自动转为 127.0.0.1:3000，或输入完整地址）: ' upstream || return 1
+        if caddy_port_ok "$upstream"; then
+            upstream="127.0.0.1:$((10#$upstream))"
+            echo -e "已自动补全目标地址: ${gl_huang}${upstream}${gl_bai}"
+        elif [[ $upstream =~ ^https?://[a-zA-Z0-9.:-]+$ || $upstream =~ ^[a-zA-Z0-9.:-]+$ ]]; then
+            :
+        else
+            echo -e "${gl_hong}地址格式不正确（暂不支持路径、IPv6 字面量）${gl_bai}" >&2
+            return 1
+        fi
+    elif [[ $mode == redirect ]]; then
+        read -r -e -p '跳转目标域名（例如 example.com，不含 https://）: ' target || return 1
+        caddy_domain_ok "$target" || { echo -e "${gl_hong}目标域名格式不正确${gl_bai}" >&2; return 1; }
+    else
+        read -r -e -p '源站 IPv4: ' ip || return 1
+        caddy_ipv4_ok "$ip" || { echo -e "${gl_hong}IPv4 格式不正确${gl_bai}" >&2; return 1; }
+        read -r -e -p '源站 HTTPS 端口 [443]: ' port || return 1
         port=${port:-443}
-        caddy_port_ok "$port" || { echo '端口不正确'; return 1; }
-        read -r -p '源站证书域名 / SNI（必须与证书匹配）: ' sni || return 1
-        caddy_domain_ok "$sni" || { echo 'SNI 域名格式不正确'; return 1; }
+        caddy_port_ok "$port" || { echo -e "${gl_hong}端口不正确${gl_bai}" >&2; return 1; }
+        read -r -e -p '源站证书域名 / SNI（必须与证书匹配）: ' sni || return 1
+        caddy_domain_ok "$sni" || { echo -e "${gl_hong}SNI 域名格式不正确${gl_bai}" >&2; return 1; }
     fi
     caddy_snapshot || return 1
     if [[ $mode == standard ]]; then
         printf '%s {\n    encode zstd gzip\n    reverse_proxy %s\n}\n' "$domain" "$upstream" > "$filename"
+    elif [[ $mode == redirect ]]; then
+        printf '%s {\n    redir https://%s{uri} permanent\n}\n' "$domain" "$target" > "$filename"
     else
         cat > "$filename" <<EOC
 $domain {
@@ -911,94 +1083,93 @@ EOC
     fi
     caddy_apply
 }
-caddy_delete() {
+
+caddy_edit() {
     caddy_prepare || return 1
-    local f domain
-    shopt -s nullglob
-    local files=("$CADDY_SITES"/*.caddy)
-    shopt -u nullglob
-    ((${#files[@]})) || { echo '没有反代配置'; return 0; }
-    printf '当前反代域名：\n'
-    for f in "${files[@]}"; do echo "  $(basename "$f" .caddy)"; done
-    read -r -p '输入要删除的域名: ' domain || return 1
-    caddy_domain_ok "$domain" || return 1
-    f="$CADDY_SITES/${domain}.caddy"
-    [[ -f $f && ! -L $f ]] || { echo '配置不存在'; return 1; }
-    read -r -p "确认删除 $domain？输入 DELETE: " answer || return 1
-    [[ $answer == DELETE ]] || return 0
-    caddy_snapshot && rm -- "$f" && caddy_apply
-}
-caddy_reset() {
-    caddy_prepare || return 1
-    echo '此操作将清空 Caddyfile 和所有 sites/*.caddy 配置，保留备份。'
-    read -r -p '输入 RESET 确认：' answer || return 1
-    [[ $answer == RESET ]] || return 0
+    local editor="" rc=0
+    caddy_select_site "请输入要编辑的站点序号或域名 (0 返回): " || rc=$?
+    [ "$rc" -eq 0 ] || return 0
+    if [ -n "${EDITOR:-}" ] && command -v "$EDITOR" >/dev/null 2>&1; then
+        editor="$EDITOR"
+    elif command -v nano >/dev/null 2>&1; then
+        editor="nano"
+    elif command -v vim >/dev/null 2>&1; then
+        editor="vim"
+    elif command -v vi >/dev/null 2>&1; then
+        editor="vi"
+    else
+        echo -e "${gl_hong}未找到可用编辑器 (nano/vim/vi)，请先安装编辑器${gl_bai}" >&2
+        return 1
+    fi
     caddy_snapshot || return 1
-    printf '# Managed by VPS Toolbox\nimport /etc/caddy/sites/*.caddy\n' > "$CADDY_MAIN"
-    local f
-    for f in "$CADDY_SITES"/*.caddy; do [[ -f $f ]] && rm -- "$f"; done
+    "$editor" "$CADDY_SELECTED_FILE" || {
+        echo -e "${gl_huang}编辑取消或失败，已保留原配置${gl_bai}"
+        caddy_restore_snapshot
+        return 1
+    }
+    caddy fmt --overwrite "$CADDY_SELECTED_FILE" 2>/dev/null || true
     caddy_apply
 }
-caddy_list() {
-    caddy_need_root && caddy_need_binary || return 1
-    echo '========== Caddy 服务状态 =========='
-    systemctl --no-pager --full status caddy 2>/dev/null | sed -n '1,8p' || true
-    echo
-    echo '========== 反代配置 =========='
-    if [[ -d $CADDY_SITES ]]; then
-        local f
-        shopt -s nullglob
-        local files=("$CADDY_SITES"/*.caddy)
-        shopt -u nullglob
-        if ((${#files[@]})); then
-            for f in "${files[@]}"; do
-                printf '\n--- %s ---\n' "$(basename "$f")"
-                sed -n '1,120p' "$f"
-            done
-        else
-            echo '目前没有由工具箱管理的反代配置。'
-        fi
-    else
-        echo '站点配置目录尚不存在。'
-    fi
+
+caddy_delete() {
+    caddy_prepare || return 1
+    local answer rc=0
+    caddy_select_site "请输入要删除的站点序号或域名 (0 返回): " || rc=$?
+    [ "$rc" -eq 0 ] || return 0
+    read -r -p "确认删除 ${CADDY_SELECTED_DOMAIN}？输入 DELETE: " answer || return 1
+    [[ $answer == DELETE ]] || { echo '已取消'; return 0; }
+    caddy_snapshot && rm -- "$CADDY_SELECTED_FILE" && caddy_apply
 }
 
-caddy_check_reload() {
-    caddy_prepare || return 1
-    echo '检查 Caddyfile 格式...'
-    caddy fmt --overwrite "$CADDY_MAIN" || return 1
-    local f
-    shopt -s nullglob
-    local files=("$CADDY_SITES"/*.caddy)
-    shopt -u nullglob
-    for f in "${files[@]}"; do caddy fmt --overwrite "$f" || return 1; done
-    caddy validate --config "$CADDY_MAIN" --adapter caddyfile || return 1
-    service_action reload caddy || { echo '重载失败，请检查 Caddy 服务状态与日志'; return 1; }
-    echo '格式检查、配置校验和重载均已完成。'
+caddy_add_menu() {
+    local choice
+    while true; do
+        clear
+        echo -e "${gl_kjlan}================== 添加站点 / 反向代理 ==================${gl_bai}"
+        echo -e "${gl_kjlan}1.${gl_bai} 标准反代 (支持直接填端口号，或 HTTP/HTTPS 地址)"
+        echo -e "${gl_kjlan}2.${gl_bai} HTTPS 指定源站 IP (自定义 SNI / Host)"
+        echo -e "${gl_kjlan}3.${gl_bai} 301 永久重定向 (例如 www -> 主域名)"
+        echo -e "${gl_kjlan}---------------------------------------------------------${gl_bai}"
+        echo -e "${gl_kjlan}0.${gl_bai} 返回上一级"
+        echo -e "${gl_kjlan}---------------------------------------------------------${gl_bai}"
+        read -r -e -p "请输入你的选择: " choice || return 0
+        case "$choice" in
+            1) caddy_add standard; break_end; return 0 ;;
+            2) caddy_add realip; break_end; return 0 ;;
+            3) caddy_add redirect; break_end; return 0 ;;
+            0) return 0 ;;
+            *) echo "无效选择"; sleep 1 ;;
+        esac
+    done
 }
+
+# ---- END modules/caddy/sites.sh ----
+
+# ---- BEGIN modules/caddy/migration.sh ----
+# ============ Caddy 迁移备份与导入 ============
+
+# Global flag used by cleanup: never delete a rollback directory if recovery failed.
+CADDY_MIGRATION_PRESERVE_ROLLBACK=0
 
 caddy_export_migration() {
     caddy_need_root || return 1
-    command -v tar >/dev/null 2>&1 || { echo '需要 tar'; return 1; }
+    command -v tar >/dev/null 2>&1 || { echo -e "${gl_hong}需要 tar${gl_bai}" >&2; return 1; }
     local dest="${1:-/root/caddy-migration-$(date +%Y%m%d-%H%M%S).tar.gz}"
-    [[ ! -e $dest && ! -L $dest ]] || { echo "文件已存在，不覆盖：$dest"; return 1; }
-    [[ -f $CADDY_MAIN ]] || { echo "$CADDY_MAIN 不存在，尚未安装或没有配置"; return 1; }
+    [[ ! -e $dest && ! -L $dest ]] || { echo -e "${gl_hong}文件已存在，不覆盖：$dest${gl_bai}" >&2; return 1; }
+    [[ -f $CADDY_MAIN ]] || { echo -e "${gl_huang}$CADDY_MAIN 不存在，尚未安装或没有配置${gl_bai}" >&2; return 1; }
     local -a paths=(etc/caddy)
     [[ ! -d /var/lib/caddy/.local/share/caddy ]] || paths+=(var/lib/caddy/.local/share/caddy)
     # Avoid packing this tool's historical snapshots into every migration archive.
     tar --exclude='etc/caddy/vps-toolbox-backups' -C / -czpf "$dest" "${paths[@]}" || {
         rm -f -- "$dest"
-        echo '导出失败，已删除不完整的备份文件。' >&2
+        echo -e "${gl_hong}导出失败，已删除不完整的备份文件。${gl_bai}" >&2
         return 1
     }
     chmod 600 "$dest" || { rm -f -- "$dest"; return 1; }
-    echo "迁移备份已生成：$dest"
+    echo -e "${gl_lv}迁移备份已生成：${gl_huang}$dest${gl_bai}"
     echo '备份包含 /etc/caddy（不含工具箱历史快照），以及存在时的 Caddy ACME/证书数据。'
-    echo '该文件可能包含私钥和账户凭据，请安全传输并限制访问。'
+    echo -e "${gl_huang}该文件可能包含私钥和账户凭据，请安全传输并限制访问。${gl_bai}"
 }
-
-# Global flag used by cleanup: never delete a rollback directory if recovery failed.
-CADDY_MIGRATION_PRESERVE_ROLLBACK=0
 
 caddy_migration_cleanup() {
     local tmp=${1:-} staged=${2:-} rollback=${3:-}
@@ -1006,25 +1177,23 @@ caddy_migration_cleanup() {
     [[ -z $staged || ! -e $staged ]] || rm -rf -- "$staged"
     if [[ -n $rollback && -e $rollback ]]; then
         if (( CADDY_MIGRATION_PRESERVE_ROLLBACK )); then
-            echo "警告：为避免丢失恢复数据，保留回滚目录：$rollback" >&2
+            echo -e "${gl_huang}警告：为避免丢失恢复数据，保留回滚目录：$rollback${gl_bai}" >&2
         else
             rm -rf -- "$rollback"
         fi
     fi
 }
 
-# Restore ACME data from a private rollback directory. If restoration fails,
-# move the backup to /root when possible and mark it for preservation otherwise.
 caddy_migration_restore_data() {
     local rollback_dir=$1 data_path=/var/lib/caddy/.local/share/caddy recovery
     [[ -n $rollback_dir && -d $rollback_dir ]] || return 0
     if ! rm -rf -- "$data_path"; then
         recovery="/root/caddy-migration-recovery-$(date +%Y%m%d-%H%M%S)-$$"
         if mv -- "$rollback_dir" "$recovery" 2>/dev/null; then
-            echo "无法移除导入后的证书目录；旧数据备份保留在：$recovery" >&2
+            echo -e "${gl_hong}无法移除导入后的证书目录；旧数据备份保留在：$recovery${gl_bai}" >&2
         else
             CADDY_MIGRATION_PRESERVE_ROLLBACK=1
-            echo "无法移除导入后的证书目录；请勿删除回滚目录：$rollback_dir" >&2
+            echo -e "${gl_hong}无法移除导入后的证书目录；请勿删除回滚目录：$rollback_dir${gl_bai}" >&2
         fi
         return 1
     fi
@@ -1032,10 +1201,10 @@ caddy_migration_restore_data() {
         if [[ ! -d $rollback_dir/caddy ]] || ! cp -a "$rollback_dir/caddy" "$data_path"; then
             recovery="/root/caddy-migration-recovery-$(date +%Y%m%d-%H%M%S)-$$"
             if mv -- "$rollback_dir" "$recovery" 2>/dev/null; then
-                echo "恢复旧证书数据失败；请手动恢复此备份：$recovery" >&2
+                echo -e "${gl_hong}恢复旧证书数据失败；请手动恢复此备份：$recovery${gl_bai}" >&2
             else
                 CADDY_MIGRATION_PRESERVE_ROLLBACK=1
-                echo "恢复旧证书数据失败；请勿删除回滚目录：$rollback_dir" >&2
+                echo -e "${gl_hong}恢复旧证书数据失败；请勿删除回滚目录：$rollback_dir${gl_bai}" >&2
             fi
             return 1
         fi
@@ -1046,76 +1215,71 @@ caddy_migration_restore_data() {
 
 caddy_import_migration() {
     caddy_need_root && caddy_need_binary || return 1
-    command -v tar >/dev/null 2>&1 || { echo '需要 tar'; return 1; }
+    command -v tar >/dev/null 2>&1 || { echo -e "${gl_hong}需要 tar${gl_bai}" >&2; return 1; }
 
     local archive tmp item listing answer data_path=/var/lib/caddy/.local/share/caddy
     local rollback_dir='' staged_data='' data_in_archive=0
     CADDY_MIGRATION_PRESERVE_ROLLBACK=0
-    read -r -p '迁移备份 tar.gz 的绝对路径: ' archive || return 1
-    [[ -f $archive && ! -L $archive ]] || { echo '备份文件不存在或不是普通文件'; return 1; }
-    tar -tzf "$archive" >/dev/null 2>&1 || { echo '备份文件不是有效的 tar.gz'; return 1; }
+    read -r -e -p '迁移备份 tar.gz 的绝对路径: ' archive || return 1
+    [[ -f $archive && ! -L $archive ]] || { echo -e "${gl_hong}备份文件不存在或不是普通文件${gl_bai}" >&2; return 1; }
+    tar -tzf "$archive" >/dev/null 2>&1 || { echo -e "${gl_hong}备份文件不是有效的 tar.gz${gl_bai}" >&2; return 1; }
 
-    # Only accept paths generated by caddy_export_migration. Reject traversal,
-    # absolute paths and links so an untrusted archive cannot escape the staging dir.
     while IFS= read -r item; do
         item=${item#./}; item=${item%/}
         [[ -z $item ]] && continue
         case "$item" in
             etc/caddy|etc/caddy/*|var/lib/caddy/.local/share/caddy|var/lib/caddy/.local/share/caddy/*) ;;
-            *) echo "备份包含不允许的路径：$item" >&2; return 1 ;;
+            *) echo -e "${gl_hong}备份包含不允许的路径：$item${gl_bai}" >&2; return 1 ;;
         esac
         [[ $item != /* && "/$item/" != *"/../"* && $item != *$'\n'* ]] || {
-            echo '备份路径不安全。' >&2; return 1;
+            echo -e "${gl_hong}备份路径不安全。${gl_bai}" >&2; return 1
         }
-    done < <(tar -tzf "$archive") || { echo '备份路径检查失败'; return 1; }
+    done < <(tar -tzf "$archive") || { echo -e "${gl_hong}备份路径检查失败${gl_bai}" >&2; return 1; }
     while IFS= read -r listing; do
         case "${listing:0:1}" in
-            l|h) echo '备份包含符号链接或硬链接，出于安全考虑拒绝导入。' >&2; return 1 ;;
+            l|h) echo -e "${gl_hong}备份包含符号链接或硬链接，出于安全考虑拒绝导入。${gl_bai}" >&2; return 1 ;;
         esac
     done < <(tar -tvzf "$archive")
 
     tmp=$(mktemp -d) || return 1
     chmod 700 "$tmp" || { rm -rf -- "$tmp"; return 1; }
     if ! tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$tmp"; then
-        rm -rf -- "$tmp"; echo '解压失败'; return 1
+        rm -rf -- "$tmp"; echo -e "${gl_hong}解压失败${gl_bai}" >&2; return 1
     fi
     [[ -f $tmp/etc/caddy/Caddyfile ]] || {
-        rm -rf -- "$tmp"; echo '备份中缺少 etc/caddy/Caddyfile'; return 1;
+        rm -rf -- "$tmp"; echo -e "${gl_hong}备份中缺少 etc/caddy/Caddyfile${gl_bai}" >&2; return 1
     }
     if [[ -d $tmp/var/lib/caddy/.local/share/caddy ]]; then data_in_archive=1; fi
 
-    echo '导入将替换 Caddyfile 和 sites 配置。若备份包含 ACME/证书数据，也会替换目标服务器对应数据。'
+    echo -e "${gl_huang}导入将替换 Caddyfile 和 sites 配置。若备份包含 ACME/证书数据，也会替换目标服务器对应数据。${gl_bai}"
     echo '当前配置会先做快照；证书数据会另行备份，以便失败时恢复。'
     read -r -p '输入 IMPORT 确认继续: ' answer || { rm -rf -- "$tmp"; return 1; }
-    [[ $answer == IMPORT ]] || { rm -rf -- "$tmp"; return 0; }
+    [[ $answer == IMPORT ]] || { rm -rf -- "$tmp"; echo '已取消'; return 0; }
 
-    caddy_snapshot || { rm -rf -- "$tmp"; echo '创建当前配置快照失败，未执行导入。' >&2; return 1; }
+    caddy_snapshot || { rm -rf -- "$tmp"; echo -e "${gl_hong}创建当前配置快照失败，未执行导入。${gl_bai}" >&2; return 1; }
 
-    # Stage incoming certificate data before touching the current data directory.
     if (( data_in_archive )); then
         mkdir -p "$(dirname "$data_path")" || { rm -rf -- "$tmp"; return 1; }
         staged_data="$(dirname "$data_path")/.caddy-migration-new.$$"
-        [[ ! -e $staged_data && ! -L $staged_data ]] || { rm -rf -- "$tmp"; echo '临时证书目录已存在，拒绝覆盖。' >&2; return 1; }
+        [[ ! -e $staged_data && ! -L $staged_data ]] || { rm -rf -- "$tmp"; echo -e "${gl_hong}临时证书目录已存在，拒绝覆盖。${gl_bai}" >&2; return 1; }
         cp -a "$tmp/var/lib/caddy/.local/share/caddy" "$staged_data" || {
-            rm -rf -- "$tmp" "$staged_data"; echo '准备新证书数据失败，未替换旧数据。' >&2; return 1;
+            rm -rf -- "$tmp" "$staged_data"; echo -e "${gl_hong}准备新证书数据失败，未替换旧数据。${gl_bai}" >&2; return 1
         }
         chown -R caddy:caddy "$staged_data" 2>/dev/null || true
         rollback_dir=$(mktemp -d "$(dirname "$data_path")/.vps-toolbox-caddy-rollback.XXXXXX") || {
-            rm -rf -- "$tmp" "$staged_data"; return 1;
+            rm -rf -- "$tmp" "$staged_data"; return 1
         }
         chmod 700 "$rollback_dir" || { caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1; }
         if [[ -d $data_path ]]; then
             cp -a "$data_path" "$rollback_dir/caddy" || {
-                caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; echo '备份旧证书数据失败，未执行导入。' >&2; return 1;
+                caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; echo -e "${gl_hong}备份旧证书数据失败，未执行导入。${gl_bai}" >&2; return 1
             }
             : > "$rollback_dir/had-data"
         fi
     fi
 
-    # Install configuration. Every failure below restores both config and, when
-    # present in the archive, the previous ACME data directory.
     if ! cp -a "$tmp/etc/caddy/Caddyfile" "$CADDY_MAIN"; then
-        echo '写入 Caddyfile 失败，正在回滚。' >&2
+        echo -e "${gl_hong}写入 Caddyfile 失败，正在回滚。${gl_bai}" >&2
         caddy_restore_snapshot || echo '警告：Caddy 配置快照恢复失败。' >&2
         [[ -z $rollback_dir ]] || caddy_migration_restore_data "$rollback_dir" || echo '警告：证书数据恢复失败。' >&2
         caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"
@@ -1125,19 +1289,19 @@ caddy_import_migration() {
         rm -rf -- "$CADDY_SITES" || {
             caddy_restore_snapshot || true
             [[ -z $rollback_dir ]] || caddy_migration_restore_data "$rollback_dir" || true
-            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1;
+            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1
         }
         cp -a "$tmp/etc/caddy/sites" "$CADDY_SITES" || {
-            echo '写入站点目录失败，正在回滚。' >&2
+            echo -e "${gl_hong}写入站点目录失败，正在回滚。${gl_bai}" >&2
             caddy_restore_snapshot || echo '警告：Caddy 配置快照恢复失败。' >&2
             [[ -z $rollback_dir ]] || caddy_migration_restore_data "$rollback_dir" || echo '警告：证书数据恢复失败。' >&2
-            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1;
+            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1
         }
     else
         mkdir -p "$CADDY_SITES" || {
             caddy_restore_snapshot || true
             [[ -z $rollback_dir ]] || caddy_migration_restore_data "$rollback_dir" || true
-            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1;
+            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1
         }
         find "$CADDY_SITES" -maxdepth 1 -type f -name '*.caddy' -delete
     fi
@@ -1146,25 +1310,25 @@ caddy_import_migration() {
         rm -rf -- "$data_path" || {
             caddy_restore_snapshot || true
             caddy_migration_restore_data "$rollback_dir" || true
-            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1;
+            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1
         }
         mv -- "$staged_data" "$data_path" || {
-            echo '安装新证书数据失败，正在回滚。' >&2
+            echo -e "${gl_hong}安装新证书数据失败，正在回滚。${gl_bai}" >&2
             caddy_restore_snapshot || echo '警告：Caddy 配置快照恢复失败。' >&2
             caddy_migration_restore_data "$rollback_dir" || echo '警告：证书数据恢复失败。' >&2
-            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1;
+            caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"; return 1
         }
     fi
 
     if ! caddy validate --config "$CADDY_MAIN" --adapter caddyfile; then
-        echo '导入配置校验失败，正在恢复导入前状态。' >&2
+        echo -e "${gl_hong}导入配置校验失败，正在恢复导入前状态。${gl_bai}" >&2
         caddy_restore_snapshot || echo '警告：Caddy 配置快照恢复失败。' >&2
         [[ -z $rollback_dir ]] || caddy_migration_restore_data "$rollback_dir" || echo '警告：证书数据恢复失败。' >&2
         caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"
         return 1
     fi
     if ! service_action reload caddy; then
-        echo '重载失败，正在恢复导入前状态。' >&2
+        echo -e "${gl_hong}重载失败，正在恢复导入前状态。${gl_bai}" >&2
         caddy_restore_snapshot || echo '警告：Caddy 配置快照恢复失败。' >&2
         [[ -z $rollback_dir ]] || caddy_migration_restore_data "$rollback_dir" || echo '警告：证书数据恢复失败。' >&2
         service_action reload caddy || true
@@ -1173,73 +1337,80 @@ caddy_import_migration() {
     fi
 
     caddy_migration_cleanup "$tmp" "$staged_data" "$rollback_dir"
-    echo '迁移配置已导入并生效。请检查 DNS、端口、防火墙和证书状态。'
+    echo -e "${gl_lv}迁移配置已导入并生效。请检查 DNS、端口、防火墙和证书状态。${gl_bai}"
     (( data_in_archive )) || echo '迁移包不含 ACME/证书数据，目标服务器现有证书数据已保留。'
 }
 
-caddy_add_menu() {
-    local choice
-    while true; do
-        echo
-        echo '添加反向代理'
-        echo '1) 标准反代（HTTP/HTTPS 域名或本机端口）'
-        echo '2) HTTPS 指定源站 IP（自定义 SNI / Host）'
-        echo '0) 返回'
-        read -r -p '请选择：' choice || return 0
-        case "$choice" in
-            1) caddy_add standard; break_end; return 0 ;;
-            2) caddy_add realip; break_end; return 0 ;;
-            0) return 0 ;;
-            *) echo '无效选择' ;;
-        esac
-    done
-}
+# ---- END modules/caddy/migration.sh ----
+
+# ---- BEGIN modules/caddy/menu.sh ----
+# ============ Caddy 管理菜单 ============
 
 caddy_menu() {
-    local choice answer
+    local choice caddy_state caddy_ver site_count=0
+    local -a site_files=()
     while true; do
         clear
-        printf '\033[36m============================\n  Caddy 管理\n============================\033[0m\n'
-        printf '\033[32m1) 安装/升级 Caddy\n2) 添加反向代理\n3) 查看服务状态与反代配置\n4) 删除反代\n5) 格式化、校验并重载配置\n6) 导出迁移备份\n7) 导入迁移备份\n8) 清空/重置反代配置\n9) 卸载 Caddy（保留配置）\n0) 返回上级菜单\033[0m\n\n'
-        read -r -p '请选择：' choice || return 0
+        site_count=0
+        if [ -d "$CADDY_SITES" ]; then
+            shopt -s nullglob
+            site_files=("$CADDY_SITES"/*.caddy)
+            shopt -u nullglob
+            site_count="${#site_files[@]}"
+        fi
+        if command -v caddy >/dev/null 2>&1; then
+            caddy_ver=$(caddy version 2>/dev/null | awk '{print $1}' || true)
+            if service_action status caddy >/dev/null 2>&1; then
+                caddy_state="${gl_lv}运行中${gl_bai} (${gl_huang}${caddy_ver:-已安装}${gl_bai})  反代站点: ${gl_lv}${site_count}${gl_bai}"
+            else
+                caddy_state="${gl_huang}已安装未运行${gl_bai} (${caddy_ver:-未知})  反代站点: ${gl_huang}${site_count}${gl_bai}"
+            fi
+        else
+            caddy_state="${gl_hui}未安装${gl_bai}"
+        fi
+
+        echo -e "${gl_kjlan}===================== Caddy 管理 =====================${gl_bai}"
+        echo -e "状态: ${caddy_state}"
+        echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
+        echo -e "${gl_huang}【 站点与反代 】${gl_bai}"
+        echo -e " ${gl_kjlan}1.${gl_bai}  添加反代 / 重定向"
+        echo -e " ${gl_kjlan}2.${gl_bai}  查看状态与反代配置"
+        echo -e " ${gl_kjlan}3.${gl_bai}  编辑反代配置 ${gl_hui}[自动校验并回滚]${gl_bai}"
+        echo -e " ${gl_kjlan}4.${gl_bai}  删除反代 ${gl_hui}[支持序号选择]${gl_bai}"
+        echo ""
+        echo -e "${gl_huang}【 服务与维护 】${gl_bai}"
+        echo -e " ${gl_kjlan}5.${gl_bai}  格式化、校验并重载配置"
+        echo -e " ${gl_kjlan}6.${gl_bai}  查看 Caddy 运行日志 ${gl_hui}[最近 / 实时]${gl_bai}"
+        echo -e " ${gl_kjlan}7.${gl_bai}  导出迁移备份"
+        echo -e " ${gl_kjlan}8.${gl_bai}  导入迁移备份"
+        echo ""
+        echo -e "${gl_huang}【 安装与重置 】${gl_bai}"
+        echo -e " ${gl_kjlan}9.${gl_bai}  安装 / 升级 Caddy"
+        echo -e " ${gl_kjlan}10.${gl_bai} ${gl_huang}清空 / 重置反代配置${gl_bai}"
+        echo -e " ${gl_kjlan}11.${gl_bai} ${gl_hong}卸载 Caddy (保留配置)${gl_bai}"
+        echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
+        echo -e " ${gl_kjlan}0.${gl_bai}  返回主菜单"
+        echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
+        read -r -e -p "请输入你的选择: " choice || return 0
         case "$choice" in
-            1) caddy_install; break_end ;;
-            2) caddy_add_menu ;;
-            3) caddy_list; break_end ;;
+            1) caddy_add_menu ;;
+            2) clear; caddy_list; break_end ;;
+            3) caddy_edit; break_end ;;
             4) caddy_delete; break_end ;;
             5) caddy_check_reload; break_end ;;
-            6) caddy_export_migration; break_end ;;
-            7) caddy_import_migration; break_end ;;
-            8) caddy_reset; break_end ;;
-            9)
-                caddy_need_root || { break_end; continue; }
-                echo '将卸载 Caddy 软件包，但保留 /etc/caddy 配置和证书数据，方便之后迁移或重新安装。'
-                read -r -p '输入 UNINSTALL 确认：' answer || return 0
-                if [[ $answer == UNINSTALL ]]; then
-                    service_action stop caddy 2>/dev/null || true
-                    if [ -d /run/systemd/system ]; then
-                        systemctl disable caddy 2>/dev/null || true
-                    elif command -v rc-update >/dev/null 2>&1; then
-                        rc-update del caddy default 2>/dev/null || true
-                    fi
-                    if command -v apt-get >/dev/null 2>&1; then
-                        apt-get remove -y caddy
-                    elif command -v dnf >/dev/null 2>&1; then
-                        dnf remove -y caddy
-                    elif command -v apk >/dev/null 2>&1; then
-                        apk del caddy
-                    else
-                        echo '当前系统暂不支持自动卸载 Caddy，请使用对应包管理器手动卸载'
-                    fi
-                fi
-                break_end ;;
+            6) caddy_logs; break_end ;;
+            7) caddy_export_migration; break_end ;;
+            8) caddy_import_migration; break_end ;;
+            9) caddy_install; break_end ;;
+            10) caddy_reset; break_end ;;
+            11) caddy_uninstall_keep_config; break_end ;;
             0) return 0 ;;
-            *) echo '无效选择'; break_end ;;
+            *) echo "无效选择"; sleep 1 ;;
         esac
     done
 }
 
-# ---- END modules/caddy/caddy.sh ----
+# ---- END modules/caddy/menu.sh ----
 
 # ---- BEGIN modules/system/maintenance.sh ----
 # ============ 系统更新与清理 ============
@@ -1383,25 +1554,27 @@ linux_info() {
     rm -f -- "$tmp_ip"
 
 
-    # 2. 内存与 Swap 采集 (统一走 /proc/meminfo，精准无误)
+    # 2. 内存与 Swap 采集 (统一走 /proc/meminfo，四舍五入到 MB)
     local mem_total mem_avail mem_used mem_p
-    mem_total=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
-    mem_avail=$(awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
+    mem_total=$(awk '/MemTotal:/ {print int(($2+512)/1024)}' /proc/meminfo)
+    mem_avail=$(awk '/MemAvailable:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null)
     if [ -z "$mem_avail" ] || [ "$mem_avail" -eq 0 ]; then
         local mem_free buffers cached
-        mem_free=$(awk '/MemFree:/ {print int($2/1024)}' /proc/meminfo)
-        buffers=$(awk '/Buffers:/ {print int($2/1024)}' /proc/meminfo)
-        cached=$(awk '/^Cached:/ {print int($2/1024)}' /proc/meminfo)
+        mem_free=$(awk '/MemFree:/ {print int(($2+512)/1024)}' /proc/meminfo)
+        buffers=$(awk '/Buffers:/ {print int(($2+512)/1024)}' /proc/meminfo)
+        cached=$(awk '/^Cached:/ {print int(($2+512)/1024)}' /proc/meminfo)
         mem_avail=$((mem_free + buffers + cached))
     fi
     mem_used=$((mem_total - mem_avail))
+    [ "$mem_used" -lt 0 ] && mem_used=0
     mem_p=$(awk -v u="$mem_used" -v t="$mem_total" 'BEGIN {printf "%.1f", (t>0 ? u*100/t : 0)}')
     mem_info="${mem_used}M/${mem_total}M (${mem_p}%)"
 
     local s_total s_free s_used s_p
-    s_total=$(awk '/SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
-    s_free=$(awk '/SwapFree:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+    s_total=$(awk '/SwapTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+    s_free=$(awk '/SwapFree:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
     s_used=$((s_total - s_free))
+    [ "$s_used" -lt 0 ] && s_used=0
     if [ "${s_total:-0}" -gt 0 ]; then
         s_p=$(awk -v u="$s_used" -v t="$s_total" 'BEGIN {printf "%.1f", u*100/t}')
         swap_info="${s_used}M/${s_total}M (${s_p}%)"
@@ -2663,50 +2836,55 @@ vps_ts_up() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
     vps_ts_need_binary || return 1
 
-    local auth_key ts_host raw_tags tags use_ssh accept_routes use_exit adv_routes
+    local auth_key auth_file="" ts_host raw_tags tags use_ssh accept_routes use_exit adv_routes rc=0
     local -a args=()
 
     echo -e "${gl_kjlan}=== Tailscale 登录 / 启动配置 ===${gl_bai}"
     read -r -s -p "Auth Key (留空则使用浏览器交互式登录): " auth_key || return 0
     echo ""
     if [ -n "$auth_key" ]; then
-        args+=(--auth-key="$auth_key")
+        auth_file=$(mktemp /tmp/vps-ts-auth.XXXXXX) || return 1
+        chmod 600 "$auth_file" || { rm -f -- "$auth_file"; return 1; }
+        printf '%s\n' "$auth_key" > "$auth_file" || { rm -f -- "$auth_file"; return 1; }
+        args+=(--auth-key="file:${auth_file}")
     fi
 
-    read -r -e -p "自定义节点名称 --hostname (留空使用系统主机名): " ts_host || return 0
+    read -r -e -p "自定义节点名称 --hostname (留空使用系统主机名): " ts_host || { rm -f -- "$auth_file"; return 0; }
     if [ -n "$ts_host" ]; then
-        vps_valid_hostname "$ts_host" || { echo "节点名称格式无效" >&2; return 1; }
+        vps_valid_hostname "$ts_host" || { rm -f -- "$auth_file"; echo "节点名称格式无效" >&2; return 1; }
         args+=(--hostname="$ts_host")
     fi
 
-    read -r -e -p "节点标签 --advertise-tags (逗号分隔，如 vps,prod；留空跳过): " raw_tags || return 0
+    read -r -e -p "节点标签 --advertise-tags (逗号分隔，如 vps,prod；留空跳过): " raw_tags || { rm -f -- "$auth_file"; return 0; }
     if [ -n "$raw_tags" ]; then
-        tags=$(vps_ts_format_tags "$raw_tags") || return 1
+        tags=$(vps_ts_format_tags "$raw_tags") || { rm -f -- "$auth_file"; return 1; }
         args+=(--advertise-tags="$tags")
         echo -e "${gl_huang}提示：使用标签前请确保已在 Tailscale 控制台 ACL 的 tagOwners 中配置对应标签。${gl_bai}"
     fi
 
-    read -r -e -p "开启 Tailscale SSH？[y/N]: " use_ssh || return 0
+    read -r -e -p "开启 Tailscale SSH？[y/N]: " use_ssh || { rm -f -- "$auth_file"; return 0; }
     [[ "$use_ssh" =~ ^[Yy]$ ]] && args+=(--ssh)
 
-    read -r -e -p "接受其他节点广播的子网路由 (--accept-routes)？[y/N]: " accept_routes || return 0
+    read -r -e -p "接受其他节点广播的子网路由 (--accept-routes)？[y/N]: " accept_routes || { rm -f -- "$auth_file"; return 0; }
     [[ "$accept_routes" =~ ^[Yy]$ ]] && args+=(--accept-routes)
 
-    read -r -e -p "作为出口节点 (--advertise-exit-node)？[y/N]: " use_exit || return 0
+    read -r -e -p "作为出口节点 (--advertise-exit-node)？[y/N]: " use_exit || { rm -f -- "$auth_file"; return 0; }
     if [[ "$use_exit" =~ ^[Yy]$ ]]; then
-        vps_ts_enable_forwarding || return 1
+        vps_ts_enable_forwarding || { rm -f -- "$auth_file"; return 1; }
         args+=(--advertise-exit-node)
     fi
 
-    read -r -e -p "广播子网路由 --advertise-routes (如 10.0.0.0/24；留空跳过): " adv_routes || return 0
+    read -r -e -p "广播子网路由 --advertise-routes (如 10.0.0.0/24；留空跳过): " adv_routes || { rm -f -- "$auth_file"; return 0; }
     if [ -n "$adv_routes" ]; then
-        [[ "$adv_routes" =~ ^[0-9A-Fa-f.:/,]+$ ]] || { echo "子网路由格式无效" >&2; return 1; }
-        vps_ts_enable_forwarding || return 1
+        [[ "$adv_routes" =~ ^[0-9A-Fa-f.:/,]+$ ]] || { rm -f -- "$auth_file"; echo "子网路由格式无效" >&2; return 1; }
+        vps_ts_enable_forwarding || { rm -f -- "$auth_file"; return 1; }
         args+=(--advertise-routes="$adv_routes")
     fi
 
     echo "正在执行 tailscale up..."
-    tailscale up "${args[@]}"
+    tailscale up "${args[@]}" || rc=$?
+    [ -z "$auth_file" ] || rm -f -- "$auth_file"
+    return "$rc"
 }
 
 vps_ts_manage_options() {
@@ -2897,28 +3075,16 @@ vps_f2b_sync_port() {
     echo -e "${gl_lv}已同步更新 Fail2ban SSH 监控端口为 ${new_port}${gl_bai}"
 }
 
-vps_f2b_install_setup() {
+vps_f2b_apply_config() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
-    local detected_port ssh_port maxretry bantime findtime backend="auto" candidate
-    detected_port=$(vps_fw_ssh_port)
+    local ssh_port="$1" maxretry="${2:-5}" findtime="${3:-10m}" bantime="${4:-1h}"
+    local backend="auto" candidate
 
-    read -r -e -p "SSH 监控端口 (回车使用检测值 ${detected_port}，多端口用逗号分隔如 22,57140): " ssh_port || return 0
-    ssh_port="${ssh_port:-$detected_port}"
-    ssh_port="${ssh_port// /}"
     vps_f2b_valid_ports "$ssh_port" || { echo "端口格式无效: $ssh_port" >&2; return 1; }
-
-    read -r -e -p "最大失败次数 maxretry [默认 5]: " maxretry || return 0
-    maxretry="${maxretry:-5}"
     [[ "$maxretry" =~ ^[0-9]+$ ]] && ((10#$maxretry >= 1 && 10#$maxretry <= 50)) || {
         echo "maxretry 需为 1-50 的整数" >&2; return 1
     }
-
-    read -r -e -p "检测时间窗口 findtime [默认 10m]: " findtime || return 0
-    findtime="${findtime:-10m}"
     [[ "$findtime" =~ ^[0-9]+[smhdw]?$ ]] || { echo "findtime 格式无效（如 10m / 1h）" >&2; return 1; }
-
-    read -r -e -p "封禁时长 bantime [默认 1h]: " bantime || return 0
-    bantime="${bantime:-1h}"
     [[ "$bantime" =~ ^-?[0-9]+[smhdw]?$ ]] || { echo "bantime 格式无效（如 1h / 1d / -1）" >&2; return 1; }
 
     if ! command -v fail2ban-client >/dev/null 2>&1; then
@@ -2960,6 +3126,27 @@ EOF
     sleep 1
     echo -e "${gl_lv}Fail2ban SSH 防爆破已启用${gl_bai}（端口: ${ssh_port}, maxretry=${maxretry}, findtime=${findtime}, bantime=${bantime}）"
     fail2ban-client status sshd 2>/dev/null || true
+}
+
+vps_f2b_install_setup() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local detected_port ssh_port maxretry bantime findtime
+    detected_port=$(vps_fw_ssh_port)
+
+    read -r -e -p "SSH 监控端口 (回车使用检测值 ${detected_port}，多端口用逗号分隔如 22,57140): " ssh_port || return 0
+    ssh_port="${ssh_port:-$detected_port}"
+    ssh_port="${ssh_port// /}"
+
+    read -r -e -p "最大失败次数 maxretry [默认 5]: " maxretry || return 0
+    maxretry="${maxretry:-5}"
+
+    read -r -e -p "检测时间窗口 findtime [默认 10m]: " findtime || return 0
+    findtime="${findtime:-10m}"
+
+    read -r -e -p "封禁时长 bantime [默认 1h]: " bantime || return 0
+    bantime="${bantime:-1h}"
+
+    vps_f2b_apply_config "$ssh_port" "$maxretry" "$findtime" "$bantime"
 }
 
 vps_f2b_unban() {
@@ -3191,6 +3378,267 @@ timezone_menu() {
 
 
 # ---- END modules/system/timezone.sh ----
+
+# ---- BEGIN modules/system/optimize.sh ----
+# ============ 一键系统优化 ============
+
+VPS_OPT_SYSCTL="/etc/sysctl.d/99-vps-toolbox-optimize.conf"
+VPS_OPT_LIMITS="/etc/security/limits.d/99-vps-toolbox.conf"
+VPS_OPT_SYSTEMD_LIMITS="/etc/systemd/system.conf.d/99-vps-toolbox-limits.conf"
+VPS_OPT_JOURNALD="/etc/systemd/journald.conf.d/99-vps-toolbox.conf"
+
+vps_opt_apply_kernel() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local mem_mb rmem_max wmem_max tcp_rmem tcp_wmem candidate
+    mem_mb=$(awk '/MemTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 512)
+
+    # 按物理内存自适应缓冲区大小，防止小内存机器 OOM
+    if [ "${mem_mb:-512}" -ge 2048 ]; then
+        rmem_max=16777216
+        wmem_max=16777216
+        tcp_rmem="4096 87380 16777216"
+        tcp_wmem="4096 65536 16777216"
+    else
+        rmem_max=4194304
+        wmem_max=4194304
+        tcp_rmem="4096 87380 4194304"
+        tcp_wmem="4096 65536 4194304"
+    fi
+
+    bbr_on || echo "提示：BBR 开启未完全生效，继续应用其余内核优化。" >&2
+
+    [ ! -L "$VPS_OPT_SYSCTL" ] || { echo "拒绝覆盖符号链接: $VPS_OPT_SYSCTL" >&2; return 1; }
+    mkdir -p /etc/sysctl.d || return 1
+    candidate=$(mktemp /etc/sysctl.d/.vps-opt.XXXXXX) || return 1
+    cat > "$candidate" <<EOF
+# Managed by VPS Toolbox
+net.core.somaxconn = 4096
+net.core.netdev_max_backlog = 4096
+net.core.rmem_max = ${rmem_max}
+net.core.wmem_max = ${wmem_max}
+net.ipv4.tcp_rmem = ${tcp_rmem}
+net.ipv4.tcp_wmem = ${tcp_wmem}
+net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_fastopen = 3
+vm.swappiness = 10
+EOF
+    chmod 644 "$candidate" && mv -f -- "$candidate" "$VPS_OPT_SYSCTL" || { rm -f -- "$candidate"; return 1; }
+    sysctl -p "$VPS_OPT_SYSCTL" >/dev/null 2>&1 || true
+
+    # 提升文件描述符上限至 65535
+    if [ ! -L "$VPS_OPT_LIMITS" ]; then
+        mkdir -p /etc/security/limits.d || return 1
+        cat > "$VPS_OPT_LIMITS" <<EOF
+# Managed by VPS Toolbox
+* soft nofile 65535
+* hard nofile 65535
+root soft nofile 65535
+root hard nofile 65535
+EOF
+        chmod 644 "$VPS_OPT_LIMITS"
+    fi
+
+    if [ -d /run/systemd/system ]; then
+        if [ ! -L "$VPS_OPT_SYSTEMD_LIMITS" ]; then
+            mkdir -p /etc/systemd/system.conf.d || return 1
+            cat > "$VPS_OPT_SYSTEMD_LIMITS" <<EOF
+# Managed by VPS Toolbox
+[Manager]
+DefaultLimitNOFILE=65535
+EOF
+            chmod 644 "$VPS_OPT_SYSTEMD_LIMITS"
+            systemctl daemon-reexec >/dev/null 2>&1 || true
+        fi
+
+        if [ ! -L "$VPS_OPT_JOURNALD" ]; then
+            mkdir -p /etc/systemd/journald.conf.d || return 1
+            cat > "$VPS_OPT_JOURNALD" <<EOF
+# Managed by VPS Toolbox
+[Journal]
+SystemMaxUse=100M
+MaxRetentionSec=7day
+EOF
+            chmod 644 "$VPS_OPT_JOURNALD"
+            service_action restart systemd-journald >/dev/null 2>&1 || true
+        fi
+    fi
+
+    echo -e "${gl_lv}内核网络、BBR、文件句柄 (65535) 与日志限制 (100M/7d) 优化已完成${gl_bai}"
+}
+
+vps_opt_auto_dns() {
+    local country
+    country=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 3 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]' || true)
+    if [ "$country" = "CN" ]; then
+        echo "检测到国内网络环境，应用国内公共 DNS (223.5.5.5 / 119.29.29.29)..."
+        vps_dns_apply "223.5.5.5" "119.29.29.29" "2400:3200::1" "2400:3200:baba::1"
+    else
+        echo "检测到海外网络环境，应用国际公共 DNS (1.1.1.1 / 8.8.8.8)..."
+        vps_dns_apply "1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888"
+    fi
+}
+
+vps_opt_full_init() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    clear
+    echo -e "${gl_kjlan}================== 新机一键优化与初始化 ==================${gl_bai}"
+    echo "即将按顺序执行以下 8 项操作："
+    echo "  1. 系统更新与清理"
+    echo "  2. 安装基础工具 (curl wget sudo unzip nano vim) 与 Docker"
+    echo "  3. 设置虚拟内存 Swap 为 1024M (1G)"
+    echo "  4. 设置系统时区为 Asia/Shanghai"
+    echo "  5. 自动优化 DNS 地址 (按地区匹配)"
+    echo "  6. 设置网络为 IPv4 优先"
+    echo "  7. 开启 BBR 加速 + 内核/文件句柄/日志调优"
+    echo "  8. 安装并启用 Fail2ban SSH 防爆破 (自动适配当前 SSH 端口)"
+    echo -e "${gl_kjlan}----------------------------------------------------------${gl_bai}"
+    local confirm
+    read -r -p "确认开始执行一键优化？(Y/N): " confirm || return 0
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "已取消"; return 0; }
+
+    local -a ok_steps=() fail_steps=()
+    local ssh_port
+
+    echo -e "\n${gl_huang}[1/8] 正在执行系统更新与清理...${gl_bai}"
+    if linux_update && linux_clean; then ok_steps+=("系统更新与清理"); else fail_steps+=("系统更新与清理"); fi
+
+    echo -e "\n${gl_huang}[2/8] 正在安装基础工具与 Docker...${gl_bai}"
+    local base_ok=1
+    pkg_install curl wget sudo unzip nano vim || base_ok=0
+    if install_docker; then
+        if [ ! -e /etc/docker/daemon.json ] && [ ! -L /etc/docker/daemon.json ]; then
+            mkdir -p /etc/docker
+            local d_cand
+            if d_cand=$(mktemp /etc/docker/.daemon.json.vps.XXXXXX); then
+                cat > "$d_cand" <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "20m",
+    "max-file": "3"
+  }
+}
+EOF
+                chmod 644 "$d_cand" && mv -f -- "$d_cand" /etc/docker/daemon.json && restart docker >/dev/null 2>&1 || rm -f -- "$d_cand"
+                echo -e "${gl_lv}已自动配置 Docker 日志轮转 (max-size=20m, max-file=3)${gl_bai}"
+            fi
+        fi
+    else
+        base_ok=0
+    fi
+    if [ "$base_ok" -eq 1 ]; then ok_steps+=("基础工具与 Docker"); else fail_steps+=("基础工具与 Docker"); fi
+
+    echo -e "\n${gl_huang}[3/8] 正在设置虚拟内存 (1024M)...${gl_bai}"
+    if add_swap 1024; then ok_steps+=("虚拟内存 1024M"); else fail_steps+=("虚拟内存 1024M"); fi
+
+    echo -e "\n${gl_huang}[4/8] 正在设置系统时区为 Asia/Shanghai...${gl_bai}"
+    if set_timedate Asia/Shanghai; then ok_steps+=("时区 Asia/Shanghai"); else fail_steps+=("时区 Asia/Shanghai"); fi
+
+    echo -e "\n${gl_huang}[5/8] 正在自动优化 DNS 地址...${gl_bai}"
+    if vps_opt_auto_dns; then ok_steps+=("自动优化 DNS"); else fail_steps+=("自动优化 DNS"); fi
+
+    echo -e "\n${gl_huang}[6/8] 正在设置 IPv4 优先...${gl_bai}"
+    if vps_set_ip_preference 4; then ok_steps+=("IPv4 优先"); else fail_steps+=("IPv4 优先"); fi
+
+    echo -e "\n${gl_huang}[7/8] 正在开启 BBR 加速并应用内核/句柄/日志优化...${gl_bai}"
+    if vps_opt_apply_kernel; then ok_steps+=("BBR 与内核优化"); else fail_steps+=("BBR 与内核优化"); fi
+
+    echo -e "\n${gl_huang}[8/8] 正在安装并配置 Fail2ban SSH 防爆破...${gl_bai}"
+    ssh_port=$(vps_fw_ssh_port)
+    if vps_f2b_apply_config "$ssh_port" 5 10m 1h; then ok_steps+=("Fail2ban (端口 $ssh_port)"); else fail_steps+=("Fail2ban"); fi
+
+    echo -e "\n${gl_kjlan}==================== 一键优化执行汇总 ====================${gl_bai}"
+    if [ "${#ok_steps[@]}" -gt 0 ]; then
+        echo -e "${gl_lv}已完成 (${#ok_steps[@]}/8):${gl_bai} ${ok_steps[*]}"
+    fi
+    if [ "${#fail_steps[@]}" -gt 0 ]; then
+        echo -e "${gl_hong}未完成/需检查 (${#fail_steps[@]}/8):${gl_bai} ${fail_steps[*]}"
+    fi
+    echo "提示：文件句柄 (nofile 65535) 将在新打开的 SSH 会话与新启动服务中生效。"
+}
+
+vps_opt_status() {
+    local cc qd swap_m tz ipc dns_str docker_ver f2b_str nofile_lim
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
+    qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+    swap_m=$(awk '/SwapTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+    tz=$(current_timezone)
+    if grep -Eq '^\s*precedence\s+::ffff:0:0/96\s+100' /etc/gai.conf 2>/dev/null; then
+        ipc="IPv4 优先"
+    else
+        ipc="系统默认"
+    fi
+    dns_str=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    docker_ver=$(docker --version 2>/dev/null || echo "未安装")
+    if command -v fail2ban-client >/dev/null 2>&1 && fail2ban-client ping >/dev/null 2>&1; then
+        f2b_str="运行中"
+    elif command -v fail2ban-client >/dev/null 2>&1; then
+        f2b_str="已安装未运行"
+    else
+        f2b_str="未安装"
+    fi
+    nofile_lim=$(ulimit -n 2>/dev/null || echo "未知")
+
+    echo -e "${gl_kjlan}==================== 当前优化状态 ====================${gl_bai}"
+    echo -e "BBR / 队列算法:    ${gl_lv}${cc} / ${qd}${gl_bai}"
+    echo -e "内核优化配置:      $([ -f "$VPS_OPT_SYSCTL" ] && echo -e "${gl_lv}已启用${gl_bai}" || echo -e "${gl_hui}未启用${gl_bai}")"
+    echo -e "文件句柄限制:      当前会话 ${nofile_lim} / 配置 $([ -f "$VPS_OPT_LIMITS" ] && echo -e "${gl_lv}65535${gl_bai}" || echo -e "${gl_hui}默认${gl_bai}")"
+    echo -e "日志体积限制:      $([ -f "$VPS_OPT_JOURNALD" ] && echo -e "${gl_lv}100M / 7天${gl_bai}" || echo -e "${gl_hui}系统默认${gl_bai}")"
+    echo -e "虚拟内存 (Swap):   ${gl_huang}${swap_m}M${gl_bai}"
+    echo -e "系统时区:          ${tz}"
+    echo -e "网络优先级:        ${ipc}"
+    echo -e "当前 DNS:          ${dns_str:-系统默认}"
+    echo -e "Docker:            ${docker_ver}"
+    echo -e "Fail2ban:          ${f2b_str}"
+    echo -e "${gl_kjlan}======================================================${gl_bai}"
+}
+
+vps_opt_revert() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local confirm
+    read -r -p "将移除工具箱写入的内核/句柄/日志调优配置，继续？(Y/N): " confirm || return 0
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "已取消"; return 0; }
+    rm -f -- "$VPS_OPT_SYSCTL" "$VPS_OPT_LIMITS" "$VPS_OPT_SYSTEMD_LIMITS" "$VPS_OPT_JOURNALD"
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reexec >/dev/null 2>&1 || true
+        service_action restart systemd-journald >/dev/null 2>&1 || true
+    fi
+    sysctl --system >/dev/null 2>&1 || true
+    echo -e "${gl_lv}已移除工具箱调优配置（BBR/Swap/Docker/Fail2ban 保持不变）${gl_bai}"
+}
+
+vps_optimize_menu() {
+    root_use || return
+    local choice
+    while true; do
+        clear
+        echo -e "${gl_kjlan}==================== 一键系统优化 ====================${gl_bai}"
+        echo -e "1. ${gl_lv}新机一键全套初始化与优化${gl_bai}"
+        echo -e "   ${gl_hui}(更新清理 + 基础工具/Docker + 1G Swap + 上海时区 + DNS + IPv4优先 + BBR/内核调优 + Fail2ban)${gl_bai}"
+        echo "2. 仅执行轻量内核调优 (BBR + TCP + 文件句柄 65535 + 日志限制)"
+        echo "3. 查看当前优化状态"
+        echo "4. 还原工具箱内核/句柄/日志调优配置"
+        echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
+        echo "0. 返回上一级"
+        echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
+        read -r -e -p "请输入你的选择: " choice || return 0
+        case "$choice" in
+            1) vps_opt_full_init; break_end ;;
+            2) vps_opt_apply_kernel; break_end ;;
+            3) clear; vps_opt_status; break_end ;;
+            4) vps_opt_revert; break_end ;;
+            0) break ;;
+            *) echo "无效选择"; sleep 1 ;;
+        esac
+    done
+}
+
+# ---- END modules/system/optimize.sh ----
 
 # ---- BEGIN modules/reinstall/reinstall.sh ----
 vps_dd_upstream_valid_key() {
@@ -3523,7 +3971,7 @@ linux_settings() {
         [ -z "$cur_port" ] && cur_port="22"
 
         local s_total
-        s_total=$(awk '/SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+        s_total=$(awk '/SwapTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 0)
         [ "$s_total" -gt 0 ] && cur_swap="${s_total}M" || cur_swap="未开启"
 
         cur_tz=$(current_timezone)
@@ -3547,19 +3995,20 @@ linux_settings() {
         printf " %-3s %-20s ${gl_hui}[防爆破/封禁管理]${gl_bai}\n" "5." "SSH 安全与 Fail2ban"
         echo ""
         echo -e "${gl_huang}【 系统与环境 】${gl_bai}"
-        printf " %-3s %-20s ${gl_hui}[主机: %s]${gl_bai}\n" "6." "修改主机名" "${cur_host}"
-        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "7." "修改虚拟内存 (Swap)" "${cur_swap}"
-        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "8." "设置系统时区" "${cur_tz}"
-        printf " %-3s %-20s ${gl_hong}[纯内存在线重装]${gl_bai}\n" "9." "一键重装系统"
-        printf " %-3s %-20s\n" "10." "一键重启服务器"
-        printf " %-3s %-20s ${gl_hui}[大目录/Top 进程]${gl_bai}\n" "11." "磁盘与负载排查"
+        printf " %-3s %-20s ${gl_lv}[新机全套/内核调优]${gl_bai}\n" "6." "一键系统优化"
+        printf " %-3s %-20s ${gl_hui}[主机: %s]${gl_bai}\n" "7." "修改主机名" "${cur_host}"
+        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "8." "修改虚拟内存 (Swap)" "${cur_swap}"
+        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "9." "设置系统时区" "${cur_tz}"
+        printf " %-3s %-20s ${gl_hong}[纯内存在线重装]${gl_bai}\n" "10." "一键重装系统"
+        printf " %-3s %-20s\n" "11." "一键重启服务器"
+        printf " %-3s %-20s ${gl_hui}[大目录/Top 进程]${gl_bai}\n" "12." "磁盘与负载排查"
         echo ""
         echo -e "${gl_huang}【 网络与规则 】${gl_bai}"
-        printf " %-3s %-20s ${gl_hui}[当前: %s]${gl_bai}\n" "12." "优化 DNS 地址" "${cur_dns}"
-        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "13." "设置 IPv4 地址优先级" "${cur_ipc}"
-        printf " %-3s %-20s ${gl_lv}[UFW / Firewalld]${gl_bai}\n" "14." "防火墙管理"
-        printf " %-3s %-20s ${gl_hong}[清空 IPv4 filter 表]${gl_bai}\n" "15." "开放 IPv4 防火墙端口"
-        printf " %-3s %-20s ${gl_hui}[ss 监听列表]${gl_bai}\n" "16." "查看本机端口占用"
+        printf " %-3s %-20s ${gl_hui}[当前: %s]${gl_bai}\n" "13." "优化 DNS 地址" "${cur_dns}"
+        printf " %-3s %-20s ${gl_lv}[当前: %s]${gl_bai}\n" "14." "设置 IPv4 地址优先级" "${cur_ipc}"
+        printf " %-3s %-20s ${gl_lv}[UFW / Firewalld]${gl_bai}\n" "15." "防火墙管理"
+        printf " %-3s %-20s ${gl_hong}[清空 IPv4 filter 表]${gl_bai}\n" "16." "开放 IPv4 防火墙端口"
+        printf " %-3s %-20s ${gl_hui}[ss 监听列表]${gl_bai}\n" "17." "查看本机端口占用"
         echo -e "${gl_kjlan}--------------------------------------------------------${gl_bai}"
         echo " 0.  返回主菜单"
         echo -e "${gl_kjlan}--------------------------------------------------------${gl_bai}"
@@ -3571,25 +4020,26 @@ linux_settings() {
             3) change_ssh_port ;;
             4) vps_ssh_key_menu ;;
             5) vps_fail2ban_menu ;;
-            6)
+            6) vps_optimize_menu ;;
+            7)
                 root_use || continue
                 read -r -e -p "请输入新主机名: " new_hostname || return 0
                 [ -z "$new_hostname" ] || vps_set_hostname "$new_hostname"
                 break_end
                 ;;
-            7)
+            8)
                 clear
                 echo -e "当前虚拟内存: ${gl_huang}${cur_swap}${gl_bai}"
                 read -r -e -p "输入新的 swap 大小 (MB，输入 0 退出): " swap_size || return 0
                 [ "$swap_size" != "0" ] && [ -n "$swap_size" ] && add_swap "$swap_size"
                 break_end
                 ;;
-            8) timezone_menu ;;
-            9) vps_dd_menu ;;
-            10) server_reboot ;;
-            11) vps_diag_menu ;;
-            12) vps_dns_menu ;;
-            13)
+            9) timezone_menu ;;
+            10) vps_dd_menu ;;
+            11) server_reboot ;;
+            12) vps_diag_menu ;;
+            13) vps_dns_menu ;;
+            14)
                 root_use || continue
                 clear
                 echo -e "当前优先级: ${gl_huang}${cur_ipc}${gl_bai}"
@@ -3601,8 +4051,8 @@ linux_settings() {
                 esac
                 break_end
                 ;;
-            14) vps_firewall_menu ;;
-            15)
+            15) vps_firewall_menu ;;
+            16)
                 root_use || continue
                 if command -v docker >/dev/null 2>&1 || command -v ufw >/dev/null 2>&1 || command -v firewall-cmd >/dev/null 2>&1; then
                     echo "检测到 Docker 或防火墙管理器，请通过对应管理器调整端口，避免破坏现有规则。"
@@ -3629,7 +4079,7 @@ linux_settings() {
                 fi
                 break_end
                 ;;
-            16) clear; ss -tulnape; break_end ;;
+            17) clear; ss -tulnape; break_end ;;
             0) break ;;
             *) echo "无效选择" ; sleep 1 ;;
         esac
@@ -3721,7 +4171,7 @@ vps_update() {
         echo "更新地址必须使用 HTTPS" >&2; break_end; return 1;
     }
     command -v curl >/dev/null 2>&1 || pkg_install curl ca-certificates || return 1
-    local tmp_file new_ver new_value current_ver="$sh_v" current_value result=0 installed_ver
+    local tmp_file sha_file expected_sha actual_sha new_ver new_value current_ver="$sh_v" current_value result=0 installed_ver
     if [ -e "$VPS_INSTALL_PATH" ] || [ -L "$VPS_INSTALL_PATH" ]; then
         vps_is_toolbox "$VPS_INSTALL_PATH" || { echo "安装文件无效，未更新" >&2; return 1; }
         installed_ver=$(grep '^sh_v=' "$VPS_INSTALL_PATH" | head -1 | cut -d'"' -f2)
@@ -3731,6 +4181,7 @@ vps_update() {
     fi
     current_value=$(vps_version_value "$current_ver") || return 1
     tmp_file=$(mktemp /tmp/vps-toolbox.XXXXXX) || return 1
+    sha_file=$(mktemp /tmp/vps-toolbox-sha.XXXXXX) || { rm -f -- "$tmp_file"; return 1; }
 
     echo "正在下载更新..."
     if curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 60 -o "$tmp_file" "$VPS_UPDATE_URL" \
@@ -3738,9 +4189,30 @@ vps_update() {
        && head -1 "$tmp_file" | grep -q '^#!/bin/bash' \
        && vps_is_toolbox "$tmp_file"; then
 
+        if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
+            if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 -o "$sha_file" "${VPS_UPDATE_URL}.sha256"; then
+                rm -f -- "$tmp_file" "$sha_file"
+                echo -e "${gl_hong}更新失败：无法下载 SHA256 校验文件${gl_bai}" >&2
+                break_end
+                return 1
+            fi
+            expected_sha=$(awk '{print $1; exit}' "$sha_file")
+            if command -v sha256sum >/dev/null 2>&1; then
+                actual_sha=$(sha256sum "$tmp_file" | awk '{print $1}')
+            else
+                actual_sha=$(shasum -a 256 "$tmp_file" | awk '{print $1}')
+            fi
+            if [[ ! "$expected_sha" =~ ^[0-9a-fA-F]{64}$ ]] || [[ "${expected_sha,,}" != "${actual_sha,,}" ]]; then
+                rm -f -- "$tmp_file" "$sha_file"
+                echo -e "${gl_hong}更新失败：SHA256 完整性校验未通过${gl_bai}" >&2
+                break_end
+                return 1
+            fi
+        fi
+
         new_ver=$(grep '^sh_v=' "$tmp_file" | head -1 | cut -d'"' -f2)
         if ! new_value=$(vps_version_value "$new_ver"); then
-            rm -f -- "$tmp_file"
+            rm -f -- "$tmp_file" "$sha_file"
             echo "更新失败：新脚本缺少有效版本号" >&2
             break_end
             return 1
@@ -3748,22 +4220,22 @@ vps_update() {
 
         if [ "$new_value" -le "$current_value" ]; then
             echo "下载版本 v$new_ver 不高于当前版本 v$current_ver，已保留当前版本"
-            rm -f "$tmp_file"
+            rm -f -- "$tmp_file" "$sha_file"
             break_end
             return
         fi
 
         if ! vps_atomic_install "$tmp_file" "$VPS_INSTALL_PATH"; then
-            rm -f -- "$tmp_file"
+            rm -f -- "$tmp_file" "$sha_file"
             echo "更新失败：无法写入安装目录" >&2
             break_end
             return 1
         fi
-        rm -f -- "$tmp_file"
-        echo -e "${gl_lv}脚本已更新到 v$new_ver${gl_bai}"
+        rm -f -- "$tmp_file" "$sha_file"
+        echo -e "${gl_lv}脚本已更新到 v$new_ver${gl_bai}（SHA256 校验通过）"
         echo "重新启动 $VPS_INSTALL_PATH 后使用新版；旧版本备份: ${VPS_INSTALL_PATH}.bak（如更新前已安装）"
     else
-        rm -f "$tmp_file"
+        rm -f -- "$tmp_file" "$sha_file"
         echo -e "${gl_hong}更新失败：下载或校验未通过${gl_bai}"
         result=1
     fi
@@ -3857,6 +4329,7 @@ VPS 工具箱 v$sh_v
   $VPS_DEFAULT_SHORTCUT fail2ban       SSH 防爆破 (Fail2ban)
   $VPS_DEFAULT_SHORTCUT firewall       防火墙管理 (UFW/Firewalld)
   $VPS_DEFAULT_SHORTCUT diag [--quick] 磁盘与负载排查
+  $VPS_DEFAULT_SHORTCUT optimize       一键系统优化 (别名: opt)
   $VPS_DEFAULT_SHORTCUT dns            优化 DNS 地址
   $VPS_DEFAULT_SHORTCUT install <包>   安装软件
   $VPS_DEFAULT_SHORTCUT remove <包>    卸载软件
@@ -3910,6 +4383,7 @@ vps_main() {
         f2b|fail2ban)            vps_fail2ban_menu ;;
         fw|firewall|防火墙)      vps_firewall_menu ;;
         diag|disk|排查)          shift; vps_diag_menu "$@" ;;
+        opt|optimize|优化)       vps_optimize_menu ;;
         dns)                     vps_dns_menu ;;
         install|add|安装)        shift; pkg_install "$@" ;;
         remove|uninstall|卸载)   shift; pkg_remove "$@" ;;

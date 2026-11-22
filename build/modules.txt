@@ -6,7 +6,11 @@ core/service.sh
 core/network.sh
 modules/system/swap.sh
 modules/docker/docker.sh
-modules/caddy/caddy.sh
+modules/caddy/common.sh
+modules/caddy/service.sh
+modules/caddy/sites.sh
+modules/caddy/migration.sh
+modules/caddy/menu.sh
 modules/system/maintenance.sh
 modules/system/info.sh
 modules/system/tools.sh
@@ -21,6 +25,7 @@ modules/network/tailscale.sh
 modules/ssh/fail2ban.sh
 modules/system/diagnose.sh
 modules/system/timezone.sh
+modules/system/optimize.sh
 modules/reinstall/reinstall.sh
 menus/settings.sh
 core/shortcut.sh

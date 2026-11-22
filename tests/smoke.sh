@@ -8,6 +8,9 @@ while IFS= read -r module || [[ -n "$module" ]]; do
 done < "$ROOT/build/modules.txt"
 bash "$ROOT/build/build.sh"
 bash -n "$ROOT/dist/vps-toolbox.sh"
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd -- "$ROOT/dist" && sha256sum -c vps-toolbox.sh.sha256 >/dev/null)
+fi
 dev_help="$(bash "$ROOT/src/main.sh" help)"
 dist_help="$(bash "$ROOT/dist/vps-toolbox.sh" help)"
 [[ "$dev_help" == "$dist_help" ]]

@@ -20,6 +20,7 @@ VPS 工具箱 v$sh_v
   $VPS_DEFAULT_SHORTCUT fail2ban       SSH 防爆破 (Fail2ban)
   $VPS_DEFAULT_SHORTCUT firewall       防火墙管理 (UFW/Firewalld)
   $VPS_DEFAULT_SHORTCUT diag [--quick] 磁盘与负载排查
+  $VPS_DEFAULT_SHORTCUT optimize       一键系统优化 (别名: opt)
   $VPS_DEFAULT_SHORTCUT dns            优化 DNS 地址
   $VPS_DEFAULT_SHORTCUT install <包>   安装软件
   $VPS_DEFAULT_SHORTCUT remove <包>    卸载软件
