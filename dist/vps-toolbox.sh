@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ============================================================
 
-sh_v="0.2.1"
+sh_v="0.3.0"
 
 # ============ 颜色定义 ============
 gl_hui='\e[37m'
@@ -416,16 +416,46 @@ vps_set_ip_preference() {
     [ "$mode" != default ] || echo "已移除工具箱设置；如仍优先 IPv4，请检查原有 precedence 配置。"
 }
 
+vps_current_dns() {
+    local dns_out=""
+    if [ -d /run/systemd/system ] && command -v resolvectl >/dev/null 2>&1 &&
+       command systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        dns_out=$(resolvectl dns 2>/dev/null | awk -F': ' 'NF>1 && $2!="" {printf "%s ", $2}' |
+            awk '{for(i=1;i<=NF;i++) if($i!="127.0.0.53" && !seen[$i]++) printf "%s ", $i}')
+    fi
+    if [ -z "${dns_out//[[:space:]]/}" ] && [ -r /run/systemd/resolve/resolv.conf ]; then
+        dns_out=$(awk '/^[[:space:]]*nameserver[[:space:]]+/ && $2!="127.0.0.53" {if(!seen[$2]++) printf "%s ", $2}' /run/systemd/resolve/resolv.conf 2>/dev/null)
+    fi
+    if [ -z "${dns_out//[[:space:]]/}" ] && [ -r /etc/resolv.conf ]; then
+        dns_out=$(awk '/^[[:space:]]*nameserver[[:space:]]+/ {if(!seen[$2]++) printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    fi
+    printf '%s\n' "${dns_out%" "}"
+}
+
 ip_address() {
-    # 外部获取，移除容易取到 NAT 内部 IP 的路由判断
-    local v4 v6
-    v4=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipv4.ip.sb 2>/dev/null ||
-         curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipinfo.io/ip 2>/dev/null || true)
+    # 外部获取，一次请求同时提取 IPv4、运营商(ASN)与地理位置
+    local v4="" v6="" info_json="" country="" city="" org=""
+    info_json=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipinfo.io/json 2>/dev/null || true)
+    if [ -n "$info_json" ]; then
+        v4=$(printf '%s\n' "$info_json" | awk -F'"' '/"ip"[[:space:]]*:/ {print $4; exit}')
+        org=$(printf '%s\n' "$info_json" | awk -F'"' '/"org"[[:space:]]*:/ {print $4; exit}')
+        country=$(printf '%s\n' "$info_json" | awk -F'"' '/"country"[[:space:]]*:/ {print $4; exit}')
+        city=$(printf '%s\n' "$info_json" | awk -F'"' '/"city"[[:space:]]*:/ {print $4; exit}')
+    fi
+    if [ -z "$v4" ]; then
+        v4=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipv4.ip.sb 2>/dev/null || true)
+    fi
     v6=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://v6.ipinfo.io/ip 2>/dev/null || true)
     v4=$(printf '%s' "$v4" | tr -d '[:space:]')
     v6=$(printf '%s' "$v6" | tr -d '[:space:]')
     [[ "$v4" =~ ^[0-9.]+$ ]] && ipv4_address="$v4" || ipv4_address=""
     [[ "$v6" =~ ^[0-9A-Fa-f:.]+$ ]] && ipv6_address="$v6" || ipv6_address=""
+    ipv4_isp="$org"
+    if [ -n "$country" ] && [ -n "$city" ]; then
+        ipv4_location="$country / $city"
+    else
+        ipv4_location="${country}${city}"
+    fi
 }
 
 
@@ -440,11 +470,65 @@ check_swap() {
     fi
 }
 
-add_swap() {
-    local new_swap="${1:-}" swap_file old_file created=0
+vps_swap_in_container() {
+    if [ -f /proc/user_beancounters ] || grep -qaE '(container=lxc|container=openvz)' /proc/1/environ 2>/dev/null; then
+        return 0
+    fi
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        case "$(systemd-detect-virt --container 2>/dev/null || true)" in
+            lxc*|openvz|docker|podman|systemd-nspawn) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+remove_swap() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local old_file removed=0
+    while IFS= read -r old_file; do
+        [[ "$old_file" =~ ^/swapfile-vps-[0-9]+m$ ]] || continue
+        if swapoff "$old_file"; then
+            sed -i "\\|^${old_file}[[:space:]]|d" /etc/fstab || return 1
+            rm -f -- "$old_file"
+            removed=$((removed + 1))
+        else
+            echo "无法关闭 $old_file（可能内存不足仍在使用）" >&2
+            return 1
+        fi
+    done < <(awk 'NR > 1 {print $1}' /proc/swaps 2>/dev/null)
+
+    shopt -s nullglob
+    for old_file in /swapfile-vps-*m; do
+        [[ "$old_file" =~ ^/swapfile-vps-[0-9]+m$ ]] || continue
+        if [ -f "$old_file" ] && [ ! -L "$old_file" ]; then
+            sed -i "\\|^${old_file}[[:space:]]|d" /etc/fstab 2>/dev/null || true
+            rm -f -- "$old_file" && removed=$((removed + 1))
+        fi
+    done
+    shopt -u nullglob
+
+    if [ "$removed" -gt 0 ]; then
+        echo -e "${gl_lv}已关闭并移除工具箱创建的 Swap 文件与 fstab 记录${gl_bai}"
+    else
+        echo "未检测到由工具箱创建的 Swap 文件（系统原有 Swap 保持不变）"
+    fi
+}
+
+add_swap() {
+    local new_swap="${1:-}" swap_file old_file created=0 fstype
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    case "$new_swap" in
+        off|del|delete|remove|关闭|删除)
+            remove_swap
+            return $?
+            ;;
+    esac
+    if vps_swap_in_container; then
+        echo "检测到当前为容器虚拟化环境 (LXC/OpenVZ 等)，宿主机通常禁止容器自行挂载 Swap" >&2
+        return 1
+    fi
     [[ "$new_swap" =~ ^[0-9]{1,5}$ ]] || {
-        echo "swap 大小请输入 128 至 32768 MB 的整数" >&2
+        echo "swap 大小请输入 128 至 32768 MB 的整数（或输入 off 关闭工具箱 Swap）" >&2
         return 1
     }
     new_swap=$((10#$new_swap))
@@ -457,12 +541,23 @@ add_swap() {
         echo "swap 路径必须是普通文件，拒绝使用符号链接或设备" >&2; return 1;
     }
     if [ ! -e "$swap_file" ]; then
-        (umask 077; fallocate -l "${new_swap}M" "$swap_file" 2>/dev/null || dd if=/dev/zero of="$swap_file" bs=1M count="$new_swap") || { rm -f -- "$swap_file"; return 1; }
-        created=1
-        chmod 600 "$swap_file" && mkswap "$swap_file" >/dev/null || {
-            rm -f -- "$swap_file"
-            return 1
-        }
+        fstype=$(df -PT / 2>/dev/null | awk 'NR==2 {print $2}')
+        if [ "$fstype" = "btrfs" ] && command -v btrfs >/dev/null 2>&1 &&
+           btrfs filesystem mkswapfile --size "${new_swap}m" "$swap_file" >/dev/null 2>&1; then
+            created=1
+            chmod 600 "$swap_file" || { rm -f -- "$swap_file"; return 1; }
+        else
+            if [ "$fstype" = "btrfs" ]; then
+                (umask 077; : > "$swap_file") || return 1
+                command -v chattr >/dev/null 2>&1 && chattr +C "$swap_file" >/dev/null 2>&1 || true
+            fi
+            (umask 077; fallocate -l "${new_swap}M" "$swap_file" 2>/dev/null || dd if=/dev/zero of="$swap_file" bs=1M count="$new_swap") || { rm -f -- "$swap_file"; return 1; }
+            created=1
+            chmod 600 "$swap_file" && mkswap "$swap_file" >/dev/null || {
+                rm -f -- "$swap_file"
+                return 1
+            }
+        fi
     fi
     if ! awk 'NR > 1 {print $1}' /proc/swaps | grep -Fxq -- "$swap_file"; then
         swapon "$swap_file" || { [ "$created" -eq 0 ] || rm -f -- "$swap_file"; return 1; }
@@ -583,76 +678,227 @@ docker_status_overview() {
     fi
 }
 
+docker_select_containers() {
+    local prompt="${1:-请输入容器序号或名称 (多个用空格分隔，0 返回): }"
+    local single_only="${2:-0}" raw token idx i=1
+    local -a names=() statuses=() images=() tokens=()
+    VPS_DOCKER_SELECTED=()
+
+    while IFS=$'\t' read -r cname cstatus cimage; do
+        [ -n "$cname" ] || continue
+        names+=("$cname")
+        statuses+=("$cstatus")
+        images+=("$cimage")
+    done < <(docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null)
+
+    if [ "${#names[@]}" -eq 0 ]; then
+        echo -e "${gl_hui}当前没有 Docker 容器${gl_bai}"
+        return 1
+    fi
+
+    echo -e "${gl_kjlan}当前容器列表：${gl_bai}"
+    for ((i=0; i<${#names[@]}; i++)); do
+        printf "  ${gl_kjlan}%2d.${gl_bai} %-24s %-22s ${gl_hui}%s${gl_bai}\n" "$((i + 1))" "${names[i]}" "${statuses[i]}" "${images[i]}"
+    done
+    echo ""
+
+    read -r -e -p "$prompt" raw || return 1
+    [ -n "${raw//[[:space:]]/}" ] || return 1
+    [ "$raw" = "0" ] && return 2
+
+    read -r -a tokens <<< "$raw"
+    if [ "$single_only" -eq 1 ] && [ "${#tokens[@]}" -gt 1 ]; then
+        echo "该操作仅支持选择单个容器" >&2
+        return 1
+    fi
+
+    for token in "${tokens[@]}"; do
+        if [[ "$token" =~ ^[0-9]+$ ]]; then
+            idx=$((10#$token))
+            if ((idx >= 1 && idx <= ${#names[@]})); then
+                VPS_DOCKER_SELECTED+=("${names[idx-1]}")
+            else
+                echo "序号超出范围: $token" >&2
+                return 1
+            fi
+        elif [[ "$token" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+            VPS_DOCKER_SELECTED+=("$token")
+        else
+            echo "容器名称无效: $token" >&2
+            return 1
+        fi
+    done
+    [ "${#VPS_DOCKER_SELECTED[@]}" -gt 0 ]
+}
+
+docker_check_updates() {
+    command -v docker >/dev/null 2>&1 || { echo "尚未安装 Docker" >&2; return 1; }
+    command -v curl >/dev/null 2>&1 || pkg_install curl ca-certificates || return 1
+    command -v jq >/dev/null 2>&1 || pkg_install jq >/dev/null 2>&1 || true
+
+    local -a containers=()
+    mapfile -t containers < <(docker ps -a --format '{{.Names}}' 2>/dev/null)
+    if [ "${#containers[@]}" -eq 0 ]; then
+        echo "当前没有 Docker 容器。"
+        return 0
+    fi
+
+    echo -e "${gl_kjlan}正在向镜像仓库查询容器镜像更新状态 (无需下载完整镜像)...${gl_bai}"
+    printf "%-24s %-34s %s\n" "容器名称" "当前镜像" "检测结果"
+    echo "--------------------------------------------------------------------------------"
+
+    local cname info created_at full_image image_id docker_ref repo tag api_url payload remote_digest local_digest status_str
+    for cname in "${containers[@]}"; do
+        info=$(docker inspect --format='{{.Created}}|{{.Config.Image}}|{{.Image}}' "$cname" 2>/dev/null) || continue
+        IFS='|' read -r created_at full_image image_id <<< "$info"
+        status_str="${gl_hui}跳过 (非 Docker Hub 或私有镜像)${gl_bai}"
+
+        docker_ref="${full_image#docker.io/}"
+        docker_ref="${docker_ref#index.docker.io/}"
+        docker_ref="${docker_ref#registry-1.docker.io/}"
+
+        if [[ "$docker_ref" != *.io/* && "$docker_ref" != *.*/*:* && "$docker_ref" != localhost/* ]]; then
+            if [[ "$docker_ref" == *@* ]]; then
+                repo="${docker_ref%@*}"
+                tag="latest"
+            elif [[ "${docker_ref##*/}" == *:* ]]; then
+                repo="${docker_ref%:*}"
+                tag="${docker_ref##*:}"
+            else
+                repo="$docker_ref"
+                tag="latest"
+            fi
+            [[ "$repo" == */* ]] || repo="library/$repo"
+            api_url="https://hub.docker.com/v2/repositories/${repo}/tags/${tag}"
+            payload=$(curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 5 --max-time 8 "$api_url" 2>/dev/null || true)
+            if [ -n "$payload" ]; then
+                if command -v jq >/dev/null 2>&1; then
+                    remote_digest=$(printf '%s' "$payload" | jq -r '.digest // empty' 2>/dev/null || true)
+                else
+                    remote_digest=$(printf '%s' "$payload" | grep -oE '"digest"[[:space:]]*:[[:space:]]*"sha256:[a-f0-9]{64}"' | head -n1 | grep -oE 'sha256:[a-f0-9]{64}' || true)
+                fi
+                local_digest=$(docker image inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$image_id" 2>/dev/null |
+                    sed -n 's/^.*@\(sha256:[a-f0-9]\{64\}\)$/\1/p' | head -n 1)
+                if [[ "$remote_digest" =~ ^sha256:[a-f0-9]{64}$ && "$local_digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+                    if [ "$remote_digest" != "$local_digest" ]; then
+                        status_str="${gl_huang}发现新版本!${gl_bai}"
+                    else
+                        status_str="${gl_lv}已是最新${gl_bai}"
+                    fi
+                else
+                    status_str="${gl_hui}无本地摘要可比对${gl_bai}"
+                fi
+            else
+                status_str="${gl_hui}仓库查询超时/未公开${gl_bai}"
+            fi
+        fi
+        printf "%-24s %-34s %b\n" "$cname" "$full_image" "$status_str"
+    done
+}
+
 docker_container_menu() {
+    local choice rc=0 name log_mode img confirm
+    local -a VPS_DOCKER_SELECTED=()
     while true; do
         clear
-        echo "Docker 容器管理"
+        echo -e "${gl_kjlan}==================== Docker 容器管理 ====================${gl_bai}"
         docker ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}"
-        echo ""
-        echo "1. 启动容器    2. 停止容器    3. 删除容器    4. 重启容器"
-        echo "5. 进入容器    6. 查看日志    7. 查看占用    8. 拉取最新镜像"
+        echo -e "${gl_kjlan}---------------------------------------------------------${gl_bai}"
+        echo "1. 启动容器 (支持序号/多选)    2. 停止容器 (支持序号/多选)"
+        echo "3. 删除容器 (支持序号/多选)    4. 重启容器 (支持序号/多选)"
+        echo "5. 进入容器终端 (序号/名称)    6. 查看容器日志 (序号/名称)"
+        echo "7. 查看容器资源占用 (stats)    8. 拉取容器最新镜像"
+        echo "9. 检测所有容器镜像是否有更新"
         echo "0. 返回"
-        echo "------------------------"
+        echo -e "${gl_kjlan}---------------------------------------------------------${gl_bai}"
         read -r -e -p "请输入你的选择: " choice || return 0
         case $choice in
-            1) read -r -e -p "容器名: " name || return 0; [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && docker start "$name" ;;
-            2) read -r -e -p "容器名: " name || return 0; [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && docker stop "$name" ;;
-            3)
-                read -r -e -p "要删除的容器名: " name || return 0
-                [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "容器名称无效" >&2; continue; }
-                read -r -e -p "确认删除容器 $name？(Y/N): " confirm || return 0
-                [[ "$confirm" =~ ^[Yy]$ ]] && docker rm -f "$name"
+            1)
+                rc=0; docker_select_containers "请输入要启动的容器序号或名称 (空格分隔，0 返回): " 0 || rc=$?
+                [ "$rc" -eq 0 ] && docker start "${VPS_DOCKER_SELECTED[@]}" && break_end
                 ;;
-            4) read -r -e -p "容器名: " name || return 0; [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && docker restart "$name" ;;
+            2)
+                rc=0; docker_select_containers "请输入要停止的容器序号或名称 (空格分隔，0 返回): " 0 || rc=$?
+                [ "$rc" -eq 0 ] && docker stop "${VPS_DOCKER_SELECTED[@]}" && break_end
+                ;;
+            3)
+                rc=0; docker_select_containers "请输入要删除的容器序号或名称 (空格分隔，0 返回): " 0 || rc=$?
+                [ "$rc" -eq 0 ] || continue
+                read -r -e -p "确认删除容器 [${VPS_DOCKER_SELECTED[*]}]？(Y/N): " confirm || return 0
+                [[ "$confirm" =~ ^[Yy]$ ]] && docker rm -f "${VPS_DOCKER_SELECTED[@]}"
+                break_end
+                ;;
+            4)
+                rc=0; docker_select_containers "请输入要重启的容器序号或名称 (空格分隔，0 返回): " 0 || rc=$?
+                [ "$rc" -eq 0 ] && docker restart "${VPS_DOCKER_SELECTED[@]}" && break_end
+                ;;
             5)
-                read -r -e -p "容器名: " name || return 0
-                if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
-                    if docker exec "$name" /bin/sh -c 'command -v bash' >/dev/null 2>&1; then
-                        docker exec -it "$name" /bin/bash
-                    else
-                        docker exec -it "$name" /bin/sh
-                    fi
+                rc=0; docker_select_containers "请输入要进入的容器序号或名称 (0 返回): " 1 || rc=$?
+                [ "$rc" -eq 0 ] || continue
+                name="${VPS_DOCKER_SELECTED[0]}"
+                if docker exec "$name" /bin/sh -c 'command -v bash' >/dev/null 2>&1; then
+                    docker exec -it "$name" /bin/bash
+                else
+                    docker exec -it "$name" /bin/sh
                 fi
                 ;;
             6)
-                read -r -e -p "容器名: " name || return 0
-                if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
-                    local log_mode
-                    read -r -e -p "日志模式 [1: 最近200行(默认) / 2: 实时追踪 -f]: " log_mode || return 0
-                    if [ "$log_mode" = "2" ]; then
-                        echo "按 Ctrl+C 退出实时日志..."
-                        docker logs -f --tail 100 "$name" || true
-                    else
-                        docker logs --tail 200 "$name"
-                    fi
+                rc=0; docker_select_containers "请输入要查看日志的容器序号或名称 (0 返回): " 1 || rc=$?
+                [ "$rc" -eq 0 ] || continue
+                name="${VPS_DOCKER_SELECTED[0]}"
+                read -r -e -p "日志模式 [1: 最近200行(默认) / 2: 实时追踪 -f]: " log_mode || return 0
+                if [ "$log_mode" = "2" ]; then
+                    echo "按 Ctrl+C 退出实时日志..."
+                    docker logs -f --tail 100 "$name" || true
+                else
+                    docker logs --tail 200 "$name"
                 fi
                 break_end
                 ;;
             7) docker stats --no-stream; break_end ;;
             8)
-                read -r -e -p "容器名: " name || return 0
-                if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
-                    local img
-                    img=$(docker inspect --format='{{.Config.Image}}' "$name" 2>/dev/null || true)
-                    if [ -n "$img" ]; then
-                        echo "正在拉取最新镜像: $img"
-                        docker pull "$img"
-                        echo "拉取完成；如需生效请通过原 compose/run 方式重建容器。"
-                    else
-                        echo "未找到容器: $name" >&2
-                    fi
+                rc=0; docker_select_containers "请输入要更新镜像的容器序号或名称 (0 返回): " 1 || rc=$?
+                [ "$rc" -eq 0 ] || continue
+                name="${VPS_DOCKER_SELECTED[0]}"
+                img=$(docker inspect --format='{{.Config.Image}}' "$name" 2>/dev/null || true)
+                if [ -n "$img" ]; then
+                    echo "正在拉取最新镜像: $img"
+                    docker pull "$img"
+                    echo "拉取完成；如需生效请通过原 compose/run 方式重建容器。"
+                else
+                    echo "未找到容器: $name" >&2
                 fi
                 break_end
                 ;;
+            9) clear; docker_check_updates; break_end ;;
             0) break ;;
             *) echo "无效选择" ; sleep 1 ;;
         esac
     done
 }
 
+docker_apply_daemon_candidate() {
+    local candidate="$1" config="/etc/docker/daemon.json" backup=""
+    if [ -f "$config" ]; then
+        backup="/etc/docker/daemon.json.vps-backup-$(date +%Y%m%d-%H%M%S)"
+        cp -p -- "$config" "$backup" || { rm -f -- "$candidate"; return 1; }
+    fi
+    chmod 644 "$candidate" && mv -f -- "$candidate" "$config" || { rm -f -- "$candidate"; return 1; }
+    if ! restart docker; then
+        echo "Docker 重启失败，正在恢复原配置..." >&2
+        if [ -n "$backup" ] && [ -f "$backup" ]; then
+            cp -p -- "$backup" "$config" && restart docker || true
+        else
+            rm -f -- "$config" && restart docker || true
+        fi
+        return 1
+    fi
+    echo -e "${gl_lv}Docker daemon.json 已更新并生效${gl_bai}${backup:+（旧配置备份: $backup）}"
+}
+
 docker_configure_daemon() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
-    local config=/etc/docker/daemon.json backup="" candidate max_size max_file mirror
+    local config=/etc/docker/daemon.json candidate max_size max_file mirror base_json="{}"
     [ ! -L "$config" ] || { echo "拒绝覆盖 daemon.json 符号链接" >&2; return 1; }
     mkdir -p /etc/docker || return 1
 
@@ -670,19 +916,28 @@ docker_configure_daemon() {
     max_file="${max_file:-3}"
     [[ "$max_file" =~ ^[1-9][0-9]?$ ]] || { echo "max-file 需为 1-99 的整数" >&2; return 1; }
 
-    read -r -e -p "镜像加速地址 (HTTPS，留空则不配置): " mirror || return 0
+    read -r -e -p "镜像加速地址 (HTTPS，留空则保留现有加速配置): " mirror || return 0
     if [ -n "$mirror" ]; then
         [[ "$mirror" =~ ^https://[A-Za-z0-9._:/-]+$ ]] || { echo "镜像加速地址必须为有效的 HTTPS URL" >&2; return 1; }
     fi
 
-    if [ -f "$config" ]; then
-        backup="/etc/docker/daemon.json.vps-backup-$(date +%Y%m%d-%H%M%S)"
-        cp -p -- "$config" "$backup" || return 1
-    fi
-
+    command -v jq >/dev/null 2>&1 || pkg_install jq >/dev/null 2>&1 || true
     candidate=$(mktemp /etc/docker/.daemon.json.vps.XXXXXX) || return 1
-    if [ -n "$mirror" ]; then
-        cat > "$candidate" <<EOF
+
+    if command -v jq >/dev/null 2>&1 && { [ ! -s "$config" ] || jq -e . "$config" >/dev/null 2>&1; }; then
+        [ -s "$config" ] && base_json=$(cat "$config")
+        if [ -n "$mirror" ]; then
+            printf '%s\n' "$base_json" | jq \
+                --arg ms "$max_size" --arg mf "$max_file" --arg mr "$mirror" \
+                '. + {"log-driver": "json-file", "log-opts": ((.["log-opts"] // {}) + {"max-size": $ms, "max-file": $mf}), "registry-mirrors": [$mr]}' > "$candidate" || { rm -f -- "$candidate"; return 1; }
+        else
+            printf '%s\n' "$base_json" | jq \
+                --arg ms "$max_size" --arg mf "$max_file" \
+                '. + {"log-driver": "json-file", "log-opts": ((.["log-opts"] // {}) + {"max-size": $ms, "max-file": $mf})}' > "$candidate" || { rm -f -- "$candidate"; return 1; }
+        fi
+    else
+        if [ -n "$mirror" ]; then
+            cat > "$candidate" <<EOF
 {
   "log-driver": "json-file",
   "log-opts": {
@@ -694,8 +949,8 @@ docker_configure_daemon() {
   ]
 }
 EOF
-    else
-        cat > "$candidate" <<EOF
+        else
+            cat > "$candidate" <<EOF
 {
   "log-driver": "json-file",
   "log-opts": {
@@ -704,38 +959,61 @@ EOF
   }
 }
 EOF
+        fi
     fi
 
-    chmod 644 "$candidate" && mv -f -- "$candidate" "$config" || { rm -f -- "$candidate"; return 1; }
-    if ! restart docker; then
-        echo "Docker 重启失败，正在恢复原配置..." >&2
-        if [ -n "$backup" ] && [ -f "$backup" ]; then
-            cp -p -- "$backup" "$config" && restart docker || true
-        else
-            rm -f -- "$config" && restart docker || true
-        fi
-        return 1
+    docker_apply_daemon_candidate "$candidate" || return 1
+    echo "提示：已保留 daemon.json 中的其他自定义字段；日志轮转限制对新建容器生效。"
+}
+
+docker_toggle_ipv6() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local mode="$1" config=/etc/docker/daemon.json candidate base_json="{}" cidr
+    [ ! -L "$config" ] || { echo "拒绝覆盖 daemon.json 符号链接" >&2; return 1; }
+    command -v jq >/dev/null 2>&1 || pkg_install jq || return 1
+    mkdir -p /etc/docker || return 1
+    if [ -s "$config" ]; then
+        jq -e . "$config" >/dev/null 2>&1 || { echo "现有 $config 不是有效 JSON，请先检查" >&2; return 1; }
+        base_json=$(cat "$config")
     fi
-    echo -e "${gl_lv}Docker daemon.json 已更新并生效${gl_bai}${backup:+（旧配置备份: $backup）}"
-    echo "提示：日志轮转限制对新建容器生效。"
+
+    candidate=$(mktemp /etc/docker/.daemon.json.vps.XXXXXX) || return 1
+    if [ "$mode" = "on" ]; then
+        read -r -e -p "Docker IPv6 子网 fixed-cidr-v6 [默认 fd00:dead:beef::/64]: " cidr || { rm -f -- "$candidate"; return 0; }
+        cidr="${cidr:-fd00:dead:beef::/64}"
+        [[ "$cidr" =~ ^[0-9A-Fa-f:]+/[0-9]{1,3}$ ]] || { rm -f -- "$candidate"; echo "IPv6 CIDR 格式无效" >&2; return 1; }
+        printf '%s\n' "$base_json" | jq --arg cidr "$cidr" \
+            '. + {"ipv6": true, "fixed-cidr-v6": $cidr, "experimental": true, "ip6tables": true}' > "$candidate" || { rm -f -- "$candidate"; return 1; }
+    else
+        printf '%s\n' "$base_json" | jq \
+            'del(.["fixed-cidr-v6"], .ip6tables) | .ipv6 = false' > "$candidate" || { rm -f -- "$candidate"; return 1; }
+    fi
+    docker_apply_daemon_candidate "$candidate"
 }
 
 docker_menu() {
+    local choice ipv6_state confirm
     while true; do
         clear
-        echo -e "Docker 管理"
+        echo -e "${gl_kjlan}====================== Docker 管理 ======================${gl_bai}"
         docker_status_overview
-        echo -e "${gl_kjlan}------------------------${gl_bai}"
+        if [ -f /etc/docker/daemon.json ] && grep -Eq '"ipv6"[[:space:]]*:[[:space:]]*true' /etc/docker/daemon.json 2>/dev/null; then
+            ipv6_state="${gl_lv}已开启${gl_bai}"
+        else
+            ipv6_state="${gl_hui}未开启${gl_bai}"
+        fi
+        echo -e "${gl_kjlan}---------------------------------------------------------${gl_bai}"
         echo "1. 安装/更新 Docker"
         echo "2. 查看 Docker 全局状态"
-        echo "3. 容器管理"
-        echo "4. 镜像管理"
+        echo "3. 容器管理 (支持序号选择/多选/镜像更新检测)"
+        echo "4. 镜像列表"
         echo "5. 清理停止的容器/无用镜像/网络（保留卷）"
         echo "6. 卸载 Docker"
         echo "7. 单独清理未使用的匿名数据卷"
-        echo "8. 配置日志轮转与镜像加速 (daemon.json)"
+        echo "8. 配置日志轮转与镜像加速 (无损合并 daemon.json)"
+        echo -e "9. 开启 / 关闭 Docker IPv6 支持 [当前: ${ipv6_state}]"
         echo "0. 返回主菜单"
-        echo -e "${gl_kjlan}------------------------${gl_bai}"
+        echo -e "${gl_kjlan}---------------------------------------------------------${gl_bai}"
         read -r -e -p "请输入你的选择: " choice || return 0
 
         case $choice in
@@ -767,6 +1045,14 @@ docker_menu() {
                 break_end
                 ;;
             8) docker_configure_daemon ; break_end ;;
+            9)
+                local v6_act
+                read -r -e -p "Docker IPv6 [1: 开启 / 2: 关闭 / 0: 取消]: " v6_act || return 0
+                case "$v6_act" in
+                    1) docker_toggle_ipv6 on; break_end ;;
+                    2) docker_toggle_ipv6 off; break_end ;;
+                esac
+                ;;
             6)
                 read -r -e -p "$(echo -e "${gl_hong}确定卸载 Docker 吗？(Y/N): ${gl_bai}")" confirm || return 0
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -897,6 +1183,32 @@ caddy_select_site() {
 # ---- BEGIN modules/caddy/service.sh ----
 # ============ Caddy 安装、服务与维护 ============
 
+caddy_ensure_firewall_ports() {
+    local ans
+    if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; then
+        if ! LC_ALL=C ufw status 2>/dev/null | grep -Eq '^80(/tcp)?[[:space:]]+ALLOW' ||
+           ! LC_ALL=C ufw status 2>/dev/null | grep -Eq '^443(/tcp)?[[:space:]]+ALLOW'; then
+            echo -e "${gl_huang}检测到 UFW 防火墙已启用，但尚未完整放行 80/443 (HTTP/HTTPS/HTTP3) 端口。${gl_bai}"
+            read -r -p "是否自动在 UFW 中放行 80/tcp、443/tcp 与 443/udp？[Y/n]: " ans || return 0
+            if [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]; then
+                ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null && ufw allow 443/udp >/dev/null &&
+                    echo -e "${gl_lv}已在 UFW 放行 80/tcp、443/tcp、443/udp${gl_bai}"
+            fi
+        fi
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        if ! firewall-cmd --query-port=80/tcp >/dev/null 2>&1 ||
+           ! firewall-cmd --query-port=443/tcp >/dev/null 2>&1; then
+            echo -e "${gl_huang}检测到 Firewalld 防火墙运行中，但尚未完整放行 80/443 端口。${gl_bai}"
+            read -r -p "是否自动在 Firewalld 中放行 80/tcp、443/tcp 与 443/udp？[Y/n]: " ans || return 0
+            if [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]; then
+                firewall-cmd --add-port=80/tcp --add-port=443/tcp --add-port=443/udp >/dev/null &&
+                    firewall-cmd --permanent --add-port=80/tcp --add-port=443/tcp --add-port=443/udp >/dev/null &&
+                    echo -e "${gl_lv}已在 Firewalld 放行 80/tcp、443/tcp、443/udp${gl_bai}"
+            fi
+        fi
+    fi
+}
+
 caddy_install() {
     caddy_need_root || return 1
     if command -v apt-get >/dev/null 2>&1; then
@@ -929,6 +1241,7 @@ caddy_install() {
     fi
     enable caddy || true
     start caddy && echo -e "${gl_lv}Caddy 已就绪: $(caddy version)${gl_bai}"
+    caddy_ensure_firewall_ports
 }
 
 caddy_uninstall_keep_config() {
@@ -977,17 +1290,43 @@ caddy_list() {
         service_action status caddy 2>/dev/null || true
     fi
     echo ""
-    echo -e "${gl_kjlan}========== 反代配置 ==========${gl_bai}"
+    echo -e "${gl_kjlan}========== 站点与反代摘要 ==========${gl_bai}"
     if [[ -d $CADDY_SITES ]]; then
-        local f
+        local f idx=1 domain stype target extra show_raw
         shopt -s nullglob
         local files=("$CADDY_SITES"/*.caddy)
         shopt -u nullglob
         if ((${#files[@]})); then
+            printf " %-4s %-28s %-14s %s\n" "序号" "域名" "类型" "后端目标 / 规则"
+            echo "----------------------------------------------------------------------------"
             for f in "${files[@]}"; do
-                echo -e "\n${gl_huang}--- $(basename "$f") ---${gl_bai}"
-                sed -n '1,120p' "$f"
+                domain=$(basename "$f" .caddy)
+                stype="自定义"
+                target="-"
+                extra=""
+                if grep -q '^[[:space:]]*redir[[:space:]]\+' "$f" 2>/dev/null; then
+                    stype="301重定向"
+                    target=$(awk '$1=="redir" {print $2; exit}' "$f")
+                elif grep -q '^[[:space:]]*reverse_proxy[[:space:]]\+' "$f" 2>/dev/null; then
+                    stype="反向代理"
+                    target=$(awk '$1=="reverse_proxy" {print $2; exit}' "$f")
+                    if grep -q 'tls_insecure_skip_verify' "$f" 2>/dev/null; then
+                        extra=" (跳过后端证书校验)"
+                    elif grep -q 'tls_server_name' "$f" 2>/dev/null; then
+                        extra=" (SNI: $(awk '$1=="tls_server_name" {print $2; exit}' "$f"))"
+                    fi
+                fi
+                printf " %-4s %-28s %-14s %s%s\n" "${idx}." "$domain" "$stype" "$target" "$extra"
+                idx=$((idx + 1))
             done
+            echo "----------------------------------------------------------------------------"
+            read -r -e -p "是否展开全部配置文件原文？[y/N]: " show_raw || return 0
+            if [[ "$show_raw" =~ ^[Yy]$ ]]; then
+                for f in "${files[@]}"; do
+                    echo -e "\n${gl_huang}--- $(basename "$f") ---${gl_bai}"
+                    sed -n '1,120p' "$f"
+                done
+            fi
         else
             echo -e "${gl_hui}目前没有由工具箱管理的反代配置。${gl_bai}"
         fi
@@ -1033,19 +1372,21 @@ caddy_logs() {
 # ============ Caddy 站点与反代管理 ============
 
 caddy_add() {
-    local mode=$1 domain upstream target port ip sni filename
+    local mode=$1 domain upstream target port ip sni filename skip_tls="n"
     caddy_prepare || return 1
     read -r -e -p '站点域名（例如 app.example.com）: ' domain || return 1
     caddy_domain_ok "$domain" || { echo -e "${gl_hong}域名格式不正确${gl_bai}" >&2; return 1; }
     filename="$CADDY_SITES/${domain}.caddy"
     [[ ! -e $filename && ! -L $filename ]] || { echo -e "${gl_huang}此域名的配置文件已存在，不会覆盖（请使用编辑功能）${gl_bai}" >&2; return 1; }
     if [[ $mode == standard ]]; then
-        read -r -e -p '目标地址（直接输入端口号如 3000 将自动转为 127.0.0.1:3000，或输入完整地址）: ' upstream || return 1
+        read -r -e -p '目标地址（直接输入端口号如 3000 将自动转为 127.0.0.1:3000，或输入 http(s)://地址）: ' upstream || return 1
         if caddy_port_ok "$upstream"; then
             upstream="127.0.0.1:$((10#$upstream))"
             echo -e "已自动补全目标地址: ${gl_huang}${upstream}${gl_bai}"
         elif [[ $upstream =~ ^https?://[a-zA-Z0-9.:-]+$ || $upstream =~ ^[a-zA-Z0-9.:-]+$ ]]; then
-            :
+            if [[ $upstream == https://* ]]; then
+                read -r -e -p '后端是否为自签名 HTTPS 证书（忽略证书校验 tls_insecure_skip_verify）？[y/N]: ' skip_tls || return 1
+            fi
         else
             echo -e "${gl_hong}地址格式不正确（暂不支持路径、IPv6 字面量）${gl_bai}" >&2
             return 1
@@ -1064,7 +1405,20 @@ caddy_add() {
     fi
     caddy_snapshot || return 1
     if [[ $mode == standard ]]; then
-        printf '%s {\n    encode zstd gzip\n    reverse_proxy %s\n}\n' "$domain" "$upstream" > "$filename"
+        if [[ $skip_tls =~ ^[Yy]$ ]]; then
+            cat > "$filename" <<EOC
+$domain {
+    encode zstd gzip
+    reverse_proxy $upstream {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
+}
+EOC
+        else
+            printf '%s {\n    encode zstd gzip\n    reverse_proxy %s\n}\n' "$domain" "$upstream" > "$filename"
+        fi
     elif [[ $mode == redirect ]]; then
         printf '%s {\n    redir https://%s{uri} permanent\n}\n' "$domain" "$target" > "$filename"
     else
@@ -1081,7 +1435,11 @@ $domain {
 }
 EOC
     fi
-    caddy_apply
+    if caddy_apply; then
+        caddy_ensure_firewall_ports
+    else
+        return 1
+    fi
 }
 
 caddy_edit() {
@@ -1519,7 +1877,7 @@ linux_info() {
         echo -e "${gl_kjlan}正在查询系统信息...${gl_bai}"
     fi
 
-    local ipv4_address ipv6_address output rx tx
+    local ipv4_address="" ipv6_address="" ipv4_isp="" ipv4_location="" output rx tx
     local cpu_info cpu_usage cpu_cores cpu_freq mem_info swap_info disk_info
     local os_info kernel hostname uptime_str load timezone current_time
     local congestion queue dns_servers tcp_conn udp_conn
@@ -1529,7 +1887,7 @@ linux_info() {
     tmp_ip=$(mktemp /tmp/vps_ip.XXXXXX)
     (
         ip_address
-        printf '%s\n%s\n' "$ipv4_address" "$ipv6_address" > "$tmp_ip"
+        printf '%s\n%s\n%s\n%s\n' "$ipv4_address" "$ipv6_address" "${ipv4_isp:-}" "${ipv4_location:-}" > "$tmp_ip"
     ) &
     local ip_pid=$!
 
@@ -1550,6 +1908,8 @@ linux_info() {
     {
         IFS= read -r ipv4_address || true
         IFS= read -r ipv6_address || true
+        IFS= read -r ipv4_isp || true
+        IFS= read -r ipv4_location || true
     } < "$tmp_ip"
     rm -f -- "$tmp_ip"
 
@@ -1597,7 +1957,7 @@ linux_info() {
     # 4. 融合指标：连接数与当前生效 DNS
     tcp_conn=$(ss -H -t 2>/dev/null | wc -l)
     udp_conn=$(ss -H -u 2>/dev/null | wc -l)
-    dns_servers=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    dns_servers=$(vps_current_dns)
 
     output_status
 
@@ -1617,9 +1977,11 @@ linux_info() {
         printf 'connections: tcp=%s udp=%s\n' "$tcp_conn" "$udp_conn"
         printf 'traffic: rx=%s tx=%s\n' "$rx" "$tx"
         printf 'tcp_cc: %s %s\n' "$congestion" "$queue"
-        [ -n "$ipv4_address" ] && printf 'ipv4: %s\n' "$ipv4_address"
-        [ -n "$ipv6_address" ] && printf 'ipv6: %s\n' "$ipv6_address"
-        [ -n "$dns_servers" ]  && printf 'dns: %s\n' "$dns_servers"
+        [ -n "$ipv4_isp" ]      && printf 'isp: %s\n' "$ipv4_isp"
+        [ -n "$ipv4_location" ] && printf 'location: %s\n' "$ipv4_location"
+        [ -n "$ipv4_address" ]  && printf 'ipv4: %s\n' "$ipv4_address"
+        [ -n "$ipv6_address" ]  && printf 'ipv6: %s\n' "$ipv6_address"
+        [ -n "$dns_servers" ]   && printf 'dns: %s\n' "$dns_servers"
         printf 'timezone: %s\n' "$timezone"
         printf 'time: %s\n' "$current_time"
         printf 'uptime: %s\n' "$uptime_str"
@@ -1645,9 +2007,11 @@ linux_info() {
     echo -e "${gl_kjlan}TCP/UDP 连接:  ${gl_bai}${tcp_conn} | ${udp_conn}"
     echo -e "${gl_kjlan}总接收/发送:   ${gl_bai}$rx / $tx"
     echo -e "${gl_kjlan}网络算法:      ${gl_bai}$congestion $queue"
-    [ -n "$ipv4_address" ] && echo -e "${gl_kjlan}IPv4 地址:     ${gl_bai}$ipv4_address"
-    [ -n "$ipv6_address" ] && echo -e "${gl_kjlan}IPv6 地址:     ${gl_bai}$ipv6_address"
-    [ -n "$dns_servers" ]  && echo -e "${gl_kjlan}DNS 地址:      ${gl_bai}$dns_servers"
+    [ -n "$ipv4_isp" ]      && echo -e "${gl_kjlan}运营商 (ASN):  ${gl_bai}$ipv4_isp"
+    [ -n "$ipv4_location" ] && echo -e "${gl_kjlan}地理位置:      ${gl_bai}$ipv4_location"
+    [ -n "$ipv4_address" ]  && echo -e "${gl_kjlan}IPv4 地址:     ${gl_bai}$ipv4_address"
+    [ -n "$ipv6_address" ]  && echo -e "${gl_kjlan}IPv6 地址:     ${gl_bai}$ipv6_address"
+    [ -n "$dns_servers" ]   && echo -e "${gl_kjlan}DNS 地址:      ${gl_bai}$dns_servers"
     echo -e "${gl_kjlan}--------------------------------------------------${gl_bai}"
     echo -e "${gl_kjlan}当前时区:      ${gl_bai}$timezone"
     echo -e "${gl_kjlan}系统时间:      ${gl_bai}$current_time"
@@ -1758,13 +2122,14 @@ linux_tools() {
 
 bbr_on() {
     local CONF="/etc/sysctl.d/99-vps-bbr.conf"
+    local MOD_CONF="/etc/modules-load.d/99-vps-bbr.conf"
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
 
     if ! lsmod 2>/dev/null | grep -q tcp_bbr; then
-        modprobe tcp_bbr 2>/dev/null
+        modprobe tcp_bbr 2>/dev/null || true
     fi
 
-    if ! sysctl -n net.ipv4.tcp_available_congestion_control | grep -qw bbr; then
+    if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
         echo "当前内核不支持 BBR，可能需要升级内核" >&2
         return 1
     fi
@@ -1776,6 +2141,16 @@ net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
     [ "$?" -eq 0 ] || return 1
+
+    # 持久化 tcp_bbr 模块，确保重启后自动加载
+    if [ ! -L "$MOD_CONF" ]; then
+        mkdir -p /etc/modules-load.d 2>/dev/null || true
+        if [ -d /etc/modules-load.d ]; then
+            printf 'tcp_bbr\n' > "$MOD_CONF" 2>/dev/null || true
+            chmod 644 "$MOD_CONF" 2>/dev/null || true
+        fi
+    fi
+
     if grep -Eq '^[[:space:]]*(net.ipv4.tcp_congestion_control|net.core.default_qdisc)[[:space:]]*=' /etc/sysctl.conf 2>/dev/null; then
         cp -p /etc/sysctl.conf "/etc/sysctl.conf.vps-backup-$(date +%Y%m%d-%H%M%S)" || return 1
         sed -i '/^[[:space:]]*net.ipv4.tcp_congestion_control[[:space:]]*=/d; /^[[:space:]]*net.core.default_qdisc[[:space:]]*=/d' /etc/sysctl.conf || return 1
@@ -1785,43 +2160,202 @@ EOF
         echo "BBR 未完全生效，请检查 sysctl 输出和配置: $CONF" >&2
         return 1
     fi
-    echo -e "${gl_lv}BBR 已成功开启${gl_bai}"
+    echo -e "${gl_lv}BBR 已成功开启并设置开机持久化${gl_bai}"
+}
+
+bbr_off() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    rm -f -- /etc/sysctl.d/99-vps-bbr.conf /etc/modules-load.d/99-vps-bbr.conf || return 1
+    sysctl --system >/dev/null 2>&1 || true
+    echo "工具箱的 BBR 配置已移除，重启后由系统默认网络算法接管。"
+}
+
+vps_bbr_xanmod_psabi() {
+    awk 'BEGIN {
+        while (!/flags/) if ((getline < "/proc/cpuinfo") != 1) exit 1
+        if (/lm/&&/cmov/&&/cx8/&&/fpu/&&/fxsr/&&/mmx/&&/syscall/&&/sse2/) level = 1
+        if (level == 1 && /cx16/&&/lahf/&&/popcnt/&&/sse4_1/&&/sse4_2/&&/ssse3/) level = 2
+        if (level == 2 && /avx/&&/avx2/&&/bmi1/&&/bmi2/&&/f16c/&&/fma/&&/abm/&&/movbe/&&/xsave/) level = 3
+        if (level > 0) { print level; exit 0 }
+        exit 1
+    }' /proc/cpuinfo 2>/dev/null
+}
+
+vps_bbr_xanmod_install() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local arch os_id="" os_codename="" level pkg="" candidate_pkg prefix
+    local keyring="/usr/share/keyrings/xanmod-archive-keyring.gpg"
+    local list_file="/etc/apt/sources.list.d/xanmod-release.list"
+    local avail_mb
+
+    arch=$(uname -m)
+    if [ "$arch" != "x86_64" ]; then
+        echo "XanMod 官方 APT 源仅支持 x86_64 架构（当前: $arch）" >&2
+        return 1
+    fi
+    if [ -r /etc/os-release ]; then
+        os_id=$(. /etc/os-release && printf '%s' "${ID:-}")
+        os_codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+    fi
+    if [[ "$os_id" != "debian" && "$os_id" != "ubuntu" ]] || ! command -v apt-get >/dev/null 2>&1; then
+        echo "XanMod 官方源自动安装仅支持 Debian / Ubuntu 系统" >&2
+        return 1
+    fi
+    case "$os_codename" in
+        bookworm|trixie|forky|sid|noble|plucky|questing) ;;
+        *)
+            echo "XanMod 官方已停止对旧发行版 (${os_codename:-未知}) 的 APT 源支持，需 Debian 12+ 或 Ubuntu 24.04+" >&2
+            return 1
+            ;;
+    esac
+
+    avail_mb=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$avail_mb" ] && [ "$avail_mb" -lt 2048 ]; then
+        echo "根分区可用空间不足 2GB（当前 ${avail_mb}MB），为防止内核安装失败已中止" >&2
+        return 1
+    fi
+    check_swap
+
+    level=$(vps_bbr_xanmod_psabi) || {
+        echo "无法识别当前 CPU 的 x86-64 指令集等级" >&2
+        return 1
+    }
+
+    pkg_install curl gnupg ca-certificates || return 1
+    [ ! -L "$keyring" ] && [ ! -L "$list_file" ] || {
+        echo "拒绝覆盖符号链接形式的 apt 源或密钥" >&2
+        return 1
+    }
+    mkdir -p /usr/share/keyrings /etc/apt/sources.list.d || return 1
+
+    local tmp_key
+    tmp_key=$(mktemp /tmp/vps-xanmod-key.XXXXXX) || return 1
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 "https://dl.xanmod.org/archive.key" -o "$tmp_key" ||
+       ! gpg --batch --yes --dearmor -o "$keyring" "$tmp_key"; then
+        rm -f -- "$tmp_key"
+        echo "下载或导入 XanMod 官方 GPG 密钥失败" >&2
+        return 1
+    fi
+    rm -f -- "$tmp_key"
+    chmod 644 "$keyring" || return 1
+    printf 'deb [signed-by=%s] http://deb.xanmod.org %s main\n' "$keyring" "$os_codename" > "$list_file" || return 1
+    chmod 644 "$list_file" || return 1
+
+    echo "正在更新 XanMod 软件源索引..."
+    apt-get update || return 1
+
+    for prefix in linux-xanmod linux-xanmod-lts; do
+        local try_level="$level"
+        while [ "$try_level" -ge 1 ]; do
+            candidate_pkg="${prefix}-x64v${try_level}"
+            if apt-cache policy "$candidate_pkg" 2>/dev/null | grep -q 'Candidate: [^n(]'; then
+                pkg="$candidate_pkg"
+                break 2
+            fi
+            try_level=$((try_level - 1))
+        done
+    done
+
+    if [ -z "$pkg" ]; then
+        echo "未在软件源中找到适配当前 CPU (x64v${level}) 的 XanMod 内核包" >&2
+        return 1
+    fi
+
+    echo -e "检测到 CPU 支持等级 ${gl_huang}x86-64-v${level}${gl_bai}，即将安装/更新: ${gl_lv}${pkg}${gl_bai}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" || return 1
+    bbr_on || true
+    echo -e "${gl_lv}XanMod BBRv3 内核 (${pkg}) 已安装完成，重启服务器后生效。${gl_bai}"
+    server_reboot
+}
+
+vps_bbr_xanmod_uninstall() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local -a installed_pkgs=()
+    mapfile -t installed_pkgs < <(dpkg-query -W -f='${Package}\n' 'linux-*xanmod*' 2>/dev/null | grep '^linux-.*xanmod' || true)
+    if [ "${#installed_pkgs[@]}" -eq 0 ]; then
+        echo "当前系统未检测到已安装的 XanMod 内核包"
+        return 0
+    fi
+    echo "将卸载以下 XanMod 内核包并移除官方源: ${installed_pkgs[*]}"
+    local confirm
+    read -r -p "输入 UNINSTALL 确认卸载 XanMod 内核: " confirm || return 0
+    [ "$confirm" = "UNINSTALL" ] || { echo "已取消"; return 0; }
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y "${installed_pkgs[@]}" || return 1
+    DEBIAN_FRONTEND=noninteractive apt-get autoremove -y || true
+    update-grub 2>/dev/null || true
+    rm -f -- /etc/apt/sources.list.d/xanmod-release.list /usr/share/keyrings/xanmod-archive-keyring.gpg
+    echo -e "${gl_lv}XanMod 内核已卸载，请重启服务器切换回系统默认内核。${gl_bai}"
+    server_reboot
 }
 
 linux_bbr() {
-    clear
-    local cc qd kver
-    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-    qd=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-    kver=$(uname -r | cut -d'-' -f1)
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            on|enable|开启) bbr_on; return $? ;;
+            off|disable|关闭) bbr_off; return $? ;;
+            status|状态)
+                printf 'kernel: %s\n' "$(uname -r)"
+                printf 'tcp_congestion_control: %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+                printf 'default_qdisc: %s\n' "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+                if modinfo tcp_bbr 2>/dev/null | grep -q '^version:'; then
+                    printf 'bbr_version: %s\n' "$(modinfo tcp_bbr 2>/dev/null | awk '/^version:/ {print $2; exit}')"
+                fi
+                return 0
+                ;;
+            xanmod|bbr3|bbrv3) vps_bbr_xanmod_install; return $? ;;
+            *) echo "用法: $VPS_DEFAULT_SHORTCUT bbr [on|off|status|xanmod]" >&2; return 1 ;;
+        esac
+    fi
 
+    local cc qd kver psabi_lvl xanmod_state
     while true; do
-        cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-        qd=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+        cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
+        qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+        kver=$(uname -r)
+        psabi_lvl=$(vps_bbr_xanmod_psabi || echo "")
+        if dpkg-query -W -f='${Package}\n' 'linux-*xanmod*' 2>/dev/null | grep -q '^linux-.*xanmod'; then
+            xanmod_state="${gl_lv}已安装 XanMod${gl_bai}"
+        else
+            xanmod_state="${gl_hui}未安装${gl_bai}${psabi_lvl:+ (CPU 支持 x64v${psabi_lvl})}"
+        fi
         clear
-        echo -e "BBR 拥塞控制管理"
+        echo -e "${gl_kjlan}================== BBR 拥塞控制管理 ==================${gl_bai}"
         echo -e "当前内核版本: ${gl_huang}$kver${gl_bai}"
         echo -e "当前 TCP 算法: ${gl_lv}$cc / $qd${gl_bai}"
-        echo "------------------------"
-        echo "1. 开启原生 BBR"
-        echo "2. 关闭 BBR 配置"
-        echo "3. 第三方强力内核加速脚本 (tcpx.sh)"
+        echo -e "BBRv3 内核:   ${xanmod_state}"
+        echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
+        echo "1. 开启原生 BBR (fq + bbr，含模块开机持久化)"
+        echo "2. 关闭工具箱 BBR 配置"
+        echo "3. 安装 / 更新 XanMod 官方 BBRv3 内核 (Debian/Ubuntu x86_64)"
+        echo "4. 卸载 XanMod BBRv3 内核"
+        echo "5. 第三方内核加速脚本 (tcpx.sh)"
+        echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
         echo "0. 返回"
-        echo "------------------------"
+        echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
         read -r -e -p "请输入你的选择: " choice || return 0
         case $choice in
             1) bbr_on ; break_end ;;
             2)
                 root_use || continue
-                rm -f /etc/sysctl.d/99-vps-bbr.conf || { break_end; continue; }
-                echo "工具箱的 BBR 配置已移除，重启后由系统默认网络算法接管。"
+                bbr_off || { break_end; continue; }
                 server_reboot
                 ;;
             3)
+                root_use || continue
+                vps_bbr_xanmod_install
+                break_end
+                ;;
+            4)
+                root_use || continue
+                vps_bbr_xanmod_uninstall
+                break_end
+                ;;
+            5)
                 run_remote_bash "${gh_proxy}raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcpx.sh"
                 break_end
                 ;;
-            *) break ;;
+            0) break ;;
+            *) echo "无效选择"; sleep 1 ;;
         esac
     done
 }
@@ -1856,6 +2390,8 @@ linux_test() {
         echo "4. 三网回程多路线检测 (backtrace)"
         echo "5. 泰尔网速三网测速 (TaiErSpeedtest)"
         echo "6. TCP 重传率与网络质量探测 (TcpQuality)"
+        echo "11. 网络质量体检脚本 (NetQuality / Net.Check.Place)"
+        echo "12. NextTrace 三网快速回程测试 (nxtrace.org)"
         echo ""
         echo -e "${gl_huang}【 硬件性能测试 】${gl_bai}"
         echo "7. YABS 性能基准测试 (CPU/FIO/带宽)"
@@ -1880,6 +2416,13 @@ linux_test() {
             8)  check_swap; run_remote_bash "${gh_proxy}raw.githubusercontent.com/xykt/HardwareQuality/main/hq.sh" ;;
             9)  run_remote_bash "${gh_proxy}github.com/spiritLHLS/ecs/raw/main/ecs.sh" ;;
             10) run_remote_bash "https://run.NodeQuality.com" ;;
+            11) run_remote_bash "https://Net.Check.Place" ;;
+            12)
+                if ! command -v nexttrace >/dev/null 2>&1; then
+                    run_remote_bash "https://nxtrace.org/nt" || { break_end; continue; }
+                fi
+                nexttrace --fast-trace --tcp
+                ;;
             0)  break ;;
             *)  echo "无效选择" ; sleep 1 ; continue ;;
         esac
@@ -1893,9 +2436,11 @@ linux_test() {
 # ---- BEGIN modules/ssh/port.sh ----
 # ============ SSH 端口修改 ============
 
-change_ssh_port() {
-    root_use || return
-    local new_port current_port config=/etc/ssh/sshd_config backup candidate sshd_bin
+vps_apply_ssh_port() {
+    local new_port="${1:-}" current_port config=/etc/ssh/sshd_config backup candidate sshd_bin
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    vps_valid_port "$new_port" || { echo "端口无效（需为 1-65535 的整数）" >&2; return 1; }
+    new_port=$((10#$new_port))
 
     sshd_bin=$(command -v sshd || true)
     [ -n "$sshd_bin" ] || sshd_bin=/usr/sbin/sshd
@@ -1904,6 +2449,71 @@ change_ssh_port() {
         return 1
     }
     command -v ss >/dev/null 2>&1 || pkg_install iproute2 || return 1
+
+    current_port=$("$sshd_bin" -T 2>/dev/null | awk '$1=="port" {print $2; exit}')
+    if [ "$new_port" = "${current_port:-22}" ]; then
+        echo "当前已使用端口 $new_port"
+        return 0
+    fi
+    if ss -H -ltn | awk -v port="$new_port" '{n=split($4,a,":"); if(a[n]==port)found=1} END {exit !found}'; then
+        echo "端口 $new_port 已被监听，请选择其他端口" >&2
+        return 1
+    fi
+    if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status | grep -q '^Status: active'; then
+        ufw allow "$new_port/tcp" || { echo "放行新端口失败，未修改 SSH" >&2; return 1; }
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        firewall-cmd --add-port="$new_port/tcp" && firewall-cmd --permanent --add-port="$new_port/tcp" || {
+            echo "放行新端口失败，未修改 SSH" >&2; return 1;
+        }
+    fi
+    backup=$(mktemp /etc/ssh/sshd_config.vps-backup.XXXXXX) || return 1
+    cp -p -- "$config" "$backup" || { rm -f -- "$backup"; return 1; }
+    candidate=$(mktemp /etc/ssh/.sshd-port.vps.XXXXXX) || { rm -f -- "$backup"; return 1; }
+    if ! { printf 'Port %s\n' "$new_port"; sed '/^[[:space:]]*Port[[:space:]]\+[0-9]\+/d' "$config"; } > "$candidate" ||
+       ! "$sshd_bin" -t -f "$candidate"; then
+        rm -f -- "$candidate"
+        echo "新 SSH 配置校验失败，未替换原配置；备份: $backup" >&2
+        return 1
+    fi
+    if ! chown root:root "$candidate" || ! chmod 600 "$candidate" || ! mv -f -- "$candidate" "$config"; then
+        rm -f -- "$candidate"
+        echo "替换 SSH 配置失败；备份: $backup" >&2
+        return 1
+    fi
+    if ! vps_ssh_reload; then
+        if cp -p -- "$backup" "$config" && vps_ssh_reload; then
+            echo "SSH 重载失败，原配置已恢复；备份: $backup" >&2
+        else
+            echo "SSH 自动恢复未完成，请通过控制台检查；备份: $backup" >&2
+        fi
+        return 1
+    fi
+    if ! ss -H -ltn | awk -v port="$new_port" '{n=split($4,a,":"); if(a[n]==port)found=1} END {exit !found}'; then
+        if cp -p -- "$backup" "$config" && vps_ssh_reload; then
+            echo "新端口未监听，已恢复原配置；备份: $backup" >&2
+        else
+            echo "新端口未监听且自动恢复未完成；备份: $backup" >&2
+        fi
+        return 1
+    fi
+    echo -e "${gl_lv}SSH 已在端口 $new_port 监听${gl_bai}；备份: $backup"
+    if declare -F vps_f2b_sync_port >/dev/null 2>&1; then
+        vps_f2b_sync_port "$new_port" || true
+    fi
+    echo "请确认云服务商安全组/防火墙已放行新端口，并在断开当前连接前新建连接测试。"
+    echo "已保留 sshd_config.d 中的配置；其中的 Port 设置也可能继续生效。"
+}
+
+change_ssh_port() {
+    if [ "$#" -gt 0 ]; then
+        vps_apply_ssh_port "$1"
+        return $?
+    fi
+    root_use || return
+    local new_port current_port sshd_bin
+    sshd_bin=$(command -v sshd || true)
+    [ -n "$sshd_bin" ] || sshd_bin=/usr/sbin/sshd
 
     while true; do
         clear
@@ -1916,62 +2526,10 @@ change_ssh_port() {
             break
         fi
 
-        if vps_valid_port "$new_port"; then
-            new_port=$((10#$new_port))
-            if [ "$new_port" = "$current_port" ]; then echo "当前已使用该端口"; break_end; return 0; fi
-            if ss -H -ltn | awk -v port="$new_port" '{n=split($4,a,":"); if(a[n]==port)found=1} END {exit !found}'; then
-                echo "端口 $new_port 已被监听，请选择其他端口" >&2
-                break_end
-                continue
-            fi
-            if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status | grep -q '^Status: active'; then
-                ufw allow "$new_port/tcp" || { echo "放行新端口失败，未修改 SSH" >&2; return 1; }
-            fi
-            if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-                firewall-cmd --add-port="$new_port/tcp" && firewall-cmd --permanent --add-port="$new_port/tcp" || {
-                    echo "放行新端口失败，未修改 SSH" >&2; return 1;
-                }
-            fi
-            backup=$(mktemp /etc/ssh/sshd_config.vps-backup.XXXXXX) || return 1
-            cp -p -- "$config" "$backup" || { rm -f -- "$backup"; return 1; }
-            candidate=$(mktemp /etc/ssh/.sshd-port.vps.XXXXXX) || { rm -f -- "$backup"; return 1; }
-            if ! { printf 'Port %s\n' "$new_port"; sed '/^[[:space:]]*Port[[:space:]]\+[0-9]\+/d' "$config"; } > "$candidate" ||
-               ! "$sshd_bin" -t -f "$candidate"; then
-                rm -f -- "$candidate"
-                echo "新 SSH 配置校验失败，未替换原配置；备份: $backup" >&2
-                return 1
-            fi
-            if ! chown root:root "$candidate" || ! chmod 600 "$candidate" || ! mv -f -- "$candidate" "$config"; then
-                rm -f -- "$candidate"
-                echo "替换 SSH 配置失败；备份: $backup" >&2
-                return 1
-            fi
-            if ! vps_ssh_reload; then
-                if cp -p -- "$backup" "$config" && vps_ssh_reload; then
-                    echo "SSH 重载失败，原配置已恢复；备份: $backup" >&2
-                else
-                    echo "SSH 自动恢复未完成，请通过控制台检查；备份: $backup" >&2
-                fi
-                return 1
-            fi
-            if ! ss -H -ltn | awk -v port="$new_port" '{n=split($4,a,":"); if(a[n]==port)found=1} END {exit !found}'; then
-                if cp -p -- "$backup" "$config" && vps_ssh_reload; then
-                    echo "新端口未监听，已恢复原配置；备份: $backup" >&2
-                else
-                    echo "新端口未监听且自动恢复未完成；备份: $backup" >&2
-                fi
-                return 1
-            fi
-            echo -e "${gl_lv}SSH 已在端口 $new_port 监听${gl_bai}；备份: $backup"
-            if declare -F vps_f2b_sync_port >/dev/null 2>&1; then
-                vps_f2b_sync_port "$new_port" || true
-            fi
-            echo "请确认云服务商安全组/防火墙已放行新端口，并在断开当前连接前新建连接测试。"
-            echo "已保留 sshd_config.d 中的配置；其中的 Port 设置也可能继续生效。"
+        if vps_apply_ssh_port "$new_port"; then
             break_end
             break
         else
-            echo "端口无效"
             break_end
         fi
     done
@@ -2200,6 +2758,32 @@ vps_ssh_policy() {
 }
 
 vps_ssh_key_menu() {
+    if [ "$#" -gt 0 ]; then
+        [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+        local sub="$1" arg="${2:-}" target_user="${3:-root}"
+        case "$sub" in
+            github)
+                [[ "$arg" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]] || { echo "GitHub 用户名无效" >&2; return 1; }
+                vps_ssh_select_user "$target_user" || return 1
+                vps_ssh_import_url "${gh_proxy}github.com/${arg}.keys"
+                return $?
+                ;;
+            https://*)
+                vps_ssh_select_user "${2:-root}" || return 1
+                vps_ssh_import_url "$sub"
+                return $?
+                ;;
+            ssh-*|ecdsa-*|sk-*)
+                vps_ssh_select_user "${2:-root}" || return 1
+                vps_ssh_add_key "$sub"
+                return $?
+                ;;
+            *)
+                echo "用法: $VPS_DEFAULT_SHORTCUT sshkey [github <用户名> [系统用户] | <HTTPS公钥URL> [系统用户] | \"<公钥内容>\" [系统用户]]" >&2
+                return 1
+                ;;
+        esac
+    fi
     root_use || return
     local choice input username status client_addr=${SSH_CONNECTION%% *}
     read -r -e -p "管理哪个 Linux 用户的密钥？(默认 root): " input || return 0
@@ -2480,6 +3064,15 @@ vps_dns_restore() {
 }
 
 vps_dns_menu() {
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            auto|自动) vps_opt_auto_dns; return $? ;;
+            restore|恢复) vps_dns_restore; return $? ;;
+            cn|国内) vps_dns_apply "223.5.5.5" "119.29.29.29" "2400:3200::1" "2400:3200:baba::1"; return $? ;;
+            global|intl|国外) vps_dns_apply "1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888"; return $? ;;
+            *) vps_dns_apply "${1:-}" "${2:-}" "${3:-}" "${4:-}"; return $? ;;
+        esac
+    fi
     root_use || return
     local choice first_v4 second_v4 first_v6 second_v6
 
@@ -2703,6 +3296,52 @@ vps_fw_enable() {
     fi
 }
 
+vps_fw_ping_status() {
+    if [ "$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null || echo 0)" = "1" ]; then
+        printf 'disabled\n'
+    else
+        printf 'enabled\n'
+    fi
+}
+
+vps_fw_set_ping() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local mode="${1:-}" conf="/etc/sysctl.d/99-vps-icmp.conf" candidate
+    [ ! -L "$conf" ] || { echo "拒绝覆盖符号链接: $conf" >&2; return 1; }
+    case "$mode" in
+        off|disable|禁ping)
+            mkdir -p /etc/sysctl.d || return 1
+            candidate=$(mktemp /etc/sysctl.d/.vps-icmp.XXXXXX) || return 1
+            cat > "$candidate" <<EOF
+# Managed by VPS Toolbox (ICMP Ping block)
+net.ipv4.icmp_echo_ignore_all = 1
+net.ipv6.icmp.echo_ignore_all = 1
+EOF
+            chmod 644 "$candidate" && mv -f -- "$candidate" "$conf" || { rm -f -- "$candidate"; return 1; }
+            sysctl -w net.ipv4.icmp_echo_ignore_all=1 >/dev/null 2>&1 || return 1
+            sysctl -w net.ipv6.icmp.echo_ignore_all=1 >/dev/null 2>&1 || true
+            echo -e "${gl_lv}已开启禁 Ping (忽略所有 IPv4/IPv6 ICMP Echo 请求)${gl_bai}"
+            ;;
+        on|enable|允许)
+            rm -f -- "$conf"
+            sysctl -w net.ipv4.icmp_echo_ignore_all=0 >/dev/null 2>&1 || return 1
+            sysctl -w net.ipv6.icmp.echo_ignore_all=0 >/dev/null 2>&1 || true
+            echo -e "${gl_lv}已恢复允许 Ping (正常响应 ICMP Echo 请求)${gl_bai}"
+            ;;
+        status|状态)
+            if [ "$(vps_fw_ping_status)" = "disabled" ]; then
+                echo "当前 Ping 状态: 已禁 Ping (net.ipv4.icmp_echo_ignore_all=1)"
+            else
+                echo "当前 Ping 状态: 允许 Ping (net.ipv4.icmp_echo_ignore_all=0)"
+            fi
+            ;;
+        *)
+            echo "用法: $VPS_DEFAULT_SHORTCUT fw ping [on|off|status]" >&2
+            return 1
+            ;;
+    esac
+}
+
 vps_fw_disable() {
     local fw="$1" confirm
     read -r -p "确认停用防火墙？(Y/N): " confirm || return 0
@@ -2715,20 +3354,54 @@ vps_fw_disable() {
 }
 
 vps_firewall_menu() {
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            ping)
+                shift
+                vps_fw_set_ping "${1:-status}"
+                return $?
+                ;;
+            status|状态)
+                local cli_fw
+                cli_fw=$(vps_fw_detect || true)
+                [ -n "$cli_fw" ] && vps_fw_status "$cli_fw" || echo "未检测到 UFW 或 Firewalld"
+                vps_fw_set_ping status
+                return 0
+                ;;
+            *)
+                echo "用法: $VPS_DEFAULT_SHORTCUT fw [status | ping <on|off|status>]" >&2
+                return 1
+                ;;
+        esac
+    fi
     root_use || return
-    local fw choice state_str
+    local fw choice state_str ping_str
     while true; do
         clear
+        if [ "$(vps_fw_ping_status)" = "disabled" ]; then
+            ping_str="${gl_huang}已禁 Ping${gl_bai}"
+        else
+            ping_str="${gl_lv}允许 Ping${gl_bai}"
+        fi
         fw=$(vps_fw_detect || true)
         if [ -z "$fw" ]; then
             echo -e "${gl_kjlan}===================== 防火墙管理 =====================${gl_bai}"
-            echo "未检测到 UFW 或 Firewalld。"
+            echo -e "未检测到 UFW 或 Firewalld。    ICMP 状态: ${ping_str}"
             echo "1. 自动安装推荐防火墙 (Debian/Ubuntu: ufw, RHEL系: firewalld)"
+            echo "7. 一键开启 / 关闭禁 Ping (ICMP)"
             echo "0. 返回上一级"
             echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
             read -r -e -p "请输入你的选择: " choice || return 0
             case "$choice" in
                 1) vps_fw_install; break_end ;;
+                7)
+                    if [ "$(vps_fw_ping_status)" = "disabled" ]; then
+                        vps_fw_set_ping on
+                    else
+                        vps_fw_set_ping off
+                    fi
+                    break_end
+                    ;;
                 0) break ;;
                 *) echo "无效选择"; sleep 1 ;;
             esac
@@ -2750,7 +3423,7 @@ vps_firewall_menu() {
         fi
 
         echo -e "${gl_kjlan}===================== 防火墙管理 =====================${gl_bai}"
-        echo -e "当前状态: ${state_str}    SSH 端口: ${gl_huang}$(vps_fw_ssh_port)${gl_bai}"
+        echo -e "当前状态: ${state_str}    SSH 端口: ${gl_huang}$(vps_fw_ssh_port)${gl_bai}    ICMP: ${ping_str}"
         echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
         echo "1. 查看防火墙状态与规则"
         echo "2. 放行端口 (TCP/UDP)"
@@ -2758,6 +3431,7 @@ vps_firewall_menu() {
         echo "4. 放行指定 IP (白名单)"
         echo "5. 启用防火墙 (自动放行当前 SSH 端口)"
         echo "6. 停用防火墙"
+        echo -e "7. 一键切换禁 Ping (ICMP) [当前: ${ping_str}]"
         echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
         echo "0. 返回上一级"
         echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
@@ -2769,6 +3443,14 @@ vps_firewall_menu() {
             4) vps_fw_allow_ip "$fw"; break_end ;;
             5) vps_fw_enable "$fw"; break_end ;;
             6) vps_fw_disable "$fw"; break_end ;;
+            7)
+                if [ "$(vps_fw_ping_status)" = "disabled" ]; then
+                    vps_fw_set_ping on
+                else
+                    vps_fw_set_ping off
+                fi
+                break_end
+                ;;
             0) break ;;
             *) echo "无效选择"; sleep 1 ;;
         esac
@@ -3389,20 +4071,55 @@ VPS_OPT_JOURNALD="/etc/systemd/journald.conf.d/99-vps-toolbox.conf"
 
 vps_opt_apply_kernel() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
-    local mem_mb rmem_max wmem_max tcp_rmem tcp_wmem candidate
+    local mem_mb rmem_max wmem_max tcp_rmem tcp_wmem somaxconn backlog swappiness min_free_kb conntrack_max tier_name
+    local candidate line applied=0 skipped=0
     mem_mb=$(awk '/MemTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 512)
 
-    # 按物理内存自适应缓冲区大小，防止小内存机器 OOM
-    if [ "${mem_mb:-512}" -ge 2048 ]; then
+    # 按物理内存分为 4 档自适应计算缓冲区、队列与 VM 参数，兼顾高吞吐与小内存防 OOM
+    if [ "${mem_mb:-512}" -ge 8192 ]; then
+        tier_name="8G+ 高吞吐档"
+        rmem_max=33554432
+        wmem_max=33554432
+        tcp_rmem="4096 262144 33554432"
+        tcp_wmem="4096 262144 33554432"
+        somaxconn=8192
+        backlog=10000
+        swappiness=5
+        min_free_kb=131072
+        conntrack_max=524288
+    elif [ "${mem_mb:-512}" -ge 2048 ]; then
+        tier_name="2G-8G 标准档"
         rmem_max=16777216
         wmem_max=16777216
-        tcp_rmem="4096 87380 16777216"
-        tcp_wmem="4096 65536 16777216"
+        tcp_rmem="4096 131072 16777216"
+        tcp_wmem="4096 131072 16777216"
+        somaxconn=4096
+        backlog=5000
+        swappiness=10
+        min_free_kb=65536
+        conntrack_max=262144
+    elif [ "${mem_mb:-512}" -ge 512 ]; then
+        tier_name="512M-2G 轻量档"
+        rmem_max=8388608
+        wmem_max=8388608
+        tcp_rmem="4096 87380 8388608"
+        tcp_wmem="4096 65536 8388608"
+        somaxconn=2048
+        backlog=2048
+        swappiness=20
+        min_free_kb=32768
+        conntrack_max=65536
     else
-        rmem_max=4194304
-        wmem_max=4194304
-        tcp_rmem="4096 87380 4194304"
-        tcp_wmem="4096 65536 4194304"
+        tier_name="<512M 微型防OOM档"
+        rmem_max=2097152
+        wmem_max=2097152
+        tcp_rmem="4096 65536 2097152"
+        tcp_wmem="4096 65536 2097152"
+        somaxconn=1024
+        backlog=1000
+        swappiness=30
+        min_free_kb=16384
+        conntrack_max=32768
     fi
 
     bbr_on || echo "提示：BBR 开启未完全生效，继续应用其余内核优化。" >&2
@@ -3410,25 +4127,51 @@ vps_opt_apply_kernel() {
     [ ! -L "$VPS_OPT_SYSCTL" ] || { echo "拒绝覆盖符号链接: $VPS_OPT_SYSCTL" >&2; return 1; }
     mkdir -p /etc/sysctl.d || return 1
     candidate=$(mktemp /etc/sysctl.d/.vps-opt.XXXXXX) || return 1
-    cat > "$candidate" <<EOF
-# Managed by VPS Toolbox
-net.core.somaxconn = 4096
-net.core.netdev_max_backlog = 4096
+    {
+        cat <<EOF
+# Managed by VPS Toolbox (${tier_name}, Mem=${mem_mb}MB)
+net.core.somaxconn = ${somaxconn}
+net.core.netdev_max_backlog = ${backlog}
 net.core.rmem_max = ${rmem_max}
 net.core.wmem_max = ${wmem_max}
 net.ipv4.tcp_rmem = ${tcp_rmem}
 net.ipv4.tcp_wmem = ${tcp_wmem}
-net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_max_syn_backlog = ${somaxconn}
+net.ipv4.tcp_max_tw_buckets = 65536
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_fastopen = 3
-vm.swappiness = 10
+net.ipv4.ip_local_port_range = 1024 65535
+fs.file-max = 1048576
+vm.swappiness = ${swappiness}
+vm.vfs_cache_pressure = 50
+vm.min_free_kbytes = ${min_free_kb}
 EOF
+        if [ -f /proc/sys/net/netfilter/nf_conntrack_max ]; then
+            cat <<EOF
+net.netfilter.nf_conntrack_max = ${conntrack_max}
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+EOF
+        fi
+    } > "$candidate" || { rm -f -- "$candidate"; return 1; }
     chmod 644 "$candidate" && mv -f -- "$candidate" "$VPS_OPT_SYSCTL" || { rm -f -- "$candidate"; return 1; }
-    sysctl -p "$VPS_OPT_SYSCTL" >/dev/null 2>&1 || true
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        if sysctl -w "$line" >/dev/null 2>&1; then
+            applied=$((applied + 1))
+        else
+            skipped=$((skipped + 1))
+        fi
+    done < "$VPS_OPT_SYSCTL"
 
     # 提升文件描述符上限至 65535
     if [ ! -L "$VPS_OPT_LIMITS" ]; then
@@ -3468,7 +4211,7 @@ EOF
         fi
     fi
 
-    echo -e "${gl_lv}内核网络、BBR、文件句柄 (65535) 与日志限制 (100M/7d) 优化已完成${gl_bai}"
+    echo -e "${gl_lv}内核调优 (${tier_name}：${applied} 项生效${skipped:+，${skipped} 项容器/内核受限已跳过})、文件句柄 (65535) 与日志限制 (100M/7d) 已完成${gl_bai}"
 }
 
 vps_opt_auto_dns() {
@@ -3573,7 +4316,7 @@ vps_opt_status() {
     else
         ipc="系统默认"
     fi
-    dns_str=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    dns_str=$(vps_current_dns)
     docker_ver=$(docker --version 2>/dev/null || echo "未安装")
     if command -v fail2ban-client >/dev/null 2>&1 && fail2ban-client ping >/dev/null 2>&1; then
         f2b_str="运行中"
@@ -3962,6 +4705,43 @@ vps_dd_menu() {
 # ---- END modules/reinstall/reinstall.sh ----
 
 # ---- BEGIN menus/settings.sh ----
+vps_switch_mirror() {
+    root_use || return
+    local choice country
+    clear
+    echo -e "${gl_kjlan}==================== 切换系统软件源 ====================${gl_bai}"
+    echo "通过 LinuxMirrors 切换发行版软件源 (自动备份原配置)："
+    echo "1. 中国大陆镜像源 (交互式选择阿里/华为/清华/中科大等)"
+    echo "2. 海外地区镜像源 (交互式选择海外及官方源)"
+    echo "3. 中国教育网镜像源 (CERNET)"
+    echo "4. 按服务器位置自动静默优选 (国内用华为云，海外用官方源)"
+    echo -e "${gl_kjlan}--------------------------------------------------------${gl_bai}"
+    echo "0. 返回"
+    echo -e "${gl_kjlan}--------------------------------------------------------${gl_bai}"
+    read -r -e -p "请输入你的选择: " choice || return 0
+    case "$choice" in
+        1) run_remote_bash "https://linuxmirrors.cn/main.sh" ;;
+        2) run_remote_bash "https://linuxmirrors.cn/main.sh" --abroad ;;
+        3) run_remote_bash "https://linuxmirrors.cn/main.sh" --edu ;;
+        4)
+            country=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 3 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]' || true)
+            if [ "$country" = "CN" ]; then
+                echo "检测到国内网络环境，应用华为云 HTTPS 软件源..."
+                run_remote_bash "https://linuxmirrors.cn/main.sh" \
+                    --source mirrors.huaweicloud.com --protocol https --use-intranet-source false \
+                    --backup true --upgrade-software false --clean-cache false --ignore-backup-tips
+            else
+                echo "检测到海外网络环境，恢复/应用系统官方软件源..."
+                run_remote_bash "https://linuxmirrors.cn/main.sh" \
+                    --use-official-source true --protocol https --use-intranet-source false \
+                    --backup true --upgrade-software false --clean-cache false --ignore-backup-tips
+            fi
+            ;;
+        *) return 0 ;;
+    esac
+    break_end
+}
+
 linux_settings() {
     while true; do
         clear
@@ -3983,7 +4763,7 @@ linux_settings() {
             cur_ipc="系统默认"
         fi
 
-        cur_dns=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null | awk '{print $1,$2}')
+        cur_dns=$(vps_current_dns | awk '{print $1,$2}')
         [ -z "$cur_dns" ] && cur_dns="系统默认"
 
         echo -e "${gl_kjlan}======================= 系统工具 =======================${gl_bai}"
@@ -4002,6 +4782,7 @@ linux_settings() {
         printf " %-3s %-20s ${gl_hong}[纯内存在线重装]${gl_bai}\n" "10." "一键重装系统"
         printf " %-3s %-20s\n" "11." "一键重启服务器"
         printf " %-3s %-20s ${gl_hui}[大目录/Top 进程]${gl_bai}\n" "12." "磁盘与负载排查"
+        printf " %-3s %-20s ${gl_hui}[LinuxMirrors 换源]${gl_bai}\n" "18." "切换系统软件源"
         echo ""
         echo -e "${gl_huang}【 网络与规则 】${gl_bai}"
         printf " %-3s %-20s ${gl_hui}[当前: %s]${gl_bai}\n" "13." "优化 DNS 地址" "${cur_dns}"
@@ -4030,9 +4811,13 @@ linux_settings() {
             8)
                 clear
                 echo -e "当前虚拟内存: ${gl_huang}${cur_swap}${gl_bai}"
-                read -r -e -p "输入新的 swap 大小 (MB，输入 0 退出): " swap_size || return 0
-                [ "$swap_size" != "0" ] && [ -n "$swap_size" ] && add_swap "$swap_size"
-                break_end
+                echo "提示：输入 128-32768 设置大小 (MB)，输入 d 或 off 关闭并删除工具箱 Swap，输入 0 返回"
+                read -r -e -p "请输入: " swap_size || return 0
+                case "$swap_size" in
+                    0|"") ;;
+                    d|D|off|OFF|del) remove_swap; break_end ;;
+                    *) add_swap "$swap_size"; break_end ;;
+                esac
                 ;;
             9) timezone_menu ;;
             10) vps_dd_menu ;;
@@ -4080,6 +4865,7 @@ linux_settings() {
                 break_end
                 ;;
             17) clear; ss -tulnape; break_end ;;
+            18) vps_switch_mirror ;;
             0) break ;;
             *) echo "无效选择" ; sleep 1 ;;
         esac
@@ -4233,7 +5019,12 @@ vps_update() {
         fi
         rm -f -- "$tmp_file" "$sha_file"
         echo -e "${gl_lv}脚本已更新到 v$new_ver${gl_bai}（SHA256 校验通过）"
-        echo "重新启动 $VPS_INSTALL_PATH 后使用新版；旧版本备份: ${VPS_INSTALL_PATH}.bak（如更新前已安装）"
+        echo "旧版本备份: ${VPS_INSTALL_PATH}.bak（可使用 '$VPS_DEFAULT_SHORTCUT rollback' 一键回滚）"
+        if [ -t 0 ] && [ -t 1 ] && vps_is_toolbox "$VPS_INSTALL_PATH"; then
+            echo -e "${gl_kjlan}正在热重载切换至新版本 v$new_ver...${gl_bai}"
+            sleep 1
+            exec bash "$VPS_INSTALL_PATH"
+        fi
     else
         rm -f -- "$tmp_file" "$sha_file"
         echo -e "${gl_hong}更新失败：下载或校验未通过${gl_bai}"
@@ -4241,6 +5032,59 @@ vps_update() {
     fi
     break_end
     return "$result"
+}
+
+vps_rollback() {
+    clear
+    echo "脚本版本回滚"
+    echo "------------------------"
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "需要 root 权限才能回滚版本" >&2
+        break_end
+        return 1
+    fi
+    local bak_file="${VPS_INSTALL_PATH}.bak" current_ver="$sh_v" bak_ver staged install_dir confirm
+    if [ ! -f "$bak_file" ] || [ -L "$bak_file" ]; then
+        echo "未找到可回滚的备份文件: $bak_file" >&2
+        break_end
+        return 1
+    fi
+    if ! vps_is_toolbox "$bak_file"; then
+        echo "备份文件校验未通过，拒绝回滚: $bak_file" >&2
+        break_end
+        return 1
+    fi
+    if [ -f "$VPS_INSTALL_PATH" ] && [ ! -L "$VPS_INSTALL_PATH" ]; then
+        current_ver=$(grep '^sh_v=' "$VPS_INSTALL_PATH" | head -1 | cut -d'"' -f2 || echo "$sh_v")
+    fi
+    bak_ver=$(grep '^sh_v=' "$bak_file" | head -1 | cut -d'"' -f2)
+    echo -e "当前版本: ${gl_huang}v${current_ver}${gl_bai}"
+    echo -e "备份版本: ${gl_lv}v${bak_ver:-未知}${gl_bai} ($bak_file)"
+    echo "------------------------"
+    read -r -p "确认回滚到备份版本 v${bak_ver}？(Y/N): " confirm || return 0
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "已取消回滚"; break_end; return 0; }
+
+    install_dir=$(dirname -- "$VPS_INSTALL_PATH")
+    staged=$(mktemp "$install_dir/.vps-rollback.XXXXXX") || return 1
+    if ! command install -m 755 "$bak_file" "$staged" || ! vps_is_toolbox "$staged"; then
+        rm -f -- "$staged"
+        echo "回滚准备失败，原文件未修改" >&2
+        break_end
+        return 1
+    fi
+    if ! mv -fT -- "$staged" "$VPS_INSTALL_PATH"; then
+        rm -f -- "$staged"
+        echo "回滚替换失败" >&2
+        break_end
+        return 1
+    fi
+    echo -e "${gl_lv}已成功回滚至 v${bak_ver}${gl_bai}"
+    if [ -t 0 ] && [ -t 1 ] && vps_is_toolbox "$VPS_INSTALL_PATH"; then
+        echo -e "${gl_kjlan}正在热重载切换至 v${bak_ver}...${gl_bai}"
+        sleep 1
+        exec bash "$VPS_INSTALL_PATH"
+    fi
+    break_end
 }
 
 # ============ 主菜单 ============
@@ -4275,7 +5119,7 @@ vps_menu() {
         echo -e "${gl_kjlan}10.${gl_bai}  Caddy 管理"
         echo -e "${gl_kjlan}11.${gl_bai}  Tailscale 管理"
         echo -e "${gl_kjlan}------------------------${gl_bai}"
-        echo -e "${gl_kjlan}00.${gl_bai}  脚本更新"
+        echo -e "${gl_kjlan}00.${gl_bai}  脚本更新 / 回滚"
         echo -e "${gl_hong}99.${gl_bai}  卸载工具箱"
         echo -e "${gl_kjlan}0.${gl_bai}   退出脚本"
         echo -e "${gl_kjlan}------------------------${gl_bai}"
@@ -4293,7 +5137,23 @@ vps_menu() {
             9)  linux_settings ;;
             10) caddy_menu ;;
             11) vps_tailscale_menu ;;
-            00) vps_update ;;
+            00)
+                if [ -f "${VPS_INSTALL_PATH}.bak" ] && [ ! -L "${VPS_INSTALL_PATH}.bak" ]; then
+                    local up_act
+                    clear
+                    echo -e "当前版本: ${gl_huang}v$sh_v${gl_bai}  (检测到本地旧版备份)"
+                    echo "1. 在线检查并更新脚本"
+                    echo "2. 回滚到上一版本 (.bak)"
+                    echo "0. 返回"
+                    read -r -e -p "请选择: " up_act || return 0
+                    case "$up_act" in
+                        1) vps_update ;;
+                        2) vps_rollback ;;
+                    esac
+                else
+                    vps_update
+                fi
+                ;;
             99) vps_uninstall ;;
             0)  clear ; exit 0 ;;
             *)  echo "无效的输入" ; sleep 1 ;;
@@ -4313,31 +5173,39 @@ VPS 工具箱 v$sh_v
 
 用法:
   $VPS_DEFAULT_SHORTCUT                启动交互菜单
+  $VPS_DEFAULT_SHORTCUT -v|--version   显示脚本版本号
   $VPS_DEFAULT_SHORTCUT info [--plain] 显示系统信息（--plain 纯文本输出）
   $VPS_DEFAULT_SHORTCUT update         系统更新
   $VPS_DEFAULT_SHORTCUT clean          系统清理
   $VPS_DEFAULT_SHORTCUT tools          基础工具管理
-  $VPS_DEFAULT_SHORTCUT docker         Docker 管理
+  $VPS_DEFAULT_SHORTCUT docker         Docker 管理 (容器序号选择/镜像更新检测/IPv6)
   $VPS_DEFAULT_SHORTCUT caddy          Caddy 管理
   $VPS_DEFAULT_SHORTCUT tailscale      Tailscale 组网管理 (别名: ts)
-  $VPS_DEFAULT_SHORTCUT bbr            BBR 管理
+  $VPS_DEFAULT_SHORTCUT bbr [on|off|status|xanmod]
+                     BBR 与 XanMod BBRv3 内核管理
   $VPS_DEFAULT_SHORTCUT warp           WARP 管理
   $VPS_DEFAULT_SHORTCUT test           测试脚本合集
   $VPS_DEFAULT_SHORTCUT settings       系统工具
   $VPS_DEFAULT_SHORTCUT dd             一键重装系统
-  $VPS_DEFAULT_SHORTCUT sshkey         用户密钥登录模式
-  $VPS_DEFAULT_SHORTCUT fail2ban       SSH 防爆破 (Fail2ban)
-  $VPS_DEFAULT_SHORTCUT firewall       防火墙管理 (UFW/Firewalld)
+  $VPS_DEFAULT_SHORTCUT sshkey [github <用户>|<URL>|"<公钥>"]
+                     用户密钥登录管理与快捷公钥导入
+  $VPS_DEFAULT_SHORTCUT sshport [端口] 修改 SSH 端口 (自动放行防火墙并同步 Fail2ban)
+  $VPS_DEFAULT_SHORTCUT fail2ban       SSH 防爆破 (Fail2ban，别名: f2b)
+  $VPS_DEFAULT_SHORTCUT firewall [status|ping <on|off|status>]
+                     防火墙与禁 Ping (ICMP) 管理 (别名: fw)
   $VPS_DEFAULT_SHORTCUT diag [--quick] 磁盘与负载排查
-  $VPS_DEFAULT_SHORTCUT optimize       一键系统优化 (别名: opt)
-  $VPS_DEFAULT_SHORTCUT dns            优化 DNS 地址
+  $VPS_DEFAULT_SHORTCUT optimize       一键系统优化与 4 档自适应内核调优 (别名: opt)
+  $VPS_DEFAULT_SHORTCUT dns [auto|cn|global|restore|<IP...>]
+                     优化或设置 DNS 地址
+  $VPS_DEFAULT_SHORTCUT mirror         切换系统软件源 (LinuxMirrors)
   $VPS_DEFAULT_SHORTCUT install <包>   安装软件
   $VPS_DEFAULT_SHORTCUT remove <包>    卸载软件
-  $VPS_DEFAULT_SHORTCUT swap <MB>      设置虚拟内存
+  $VPS_DEFAULT_SHORTCUT swap <MB|off>  设置或关闭虚拟内存
   $VPS_DEFAULT_SHORTCUT time <时区>    设置时区
   $VPS_DEFAULT_SHORTCUT reboot         重启服务器
   $VPS_DEFAULT_SHORTCUT shortcut       设置快捷键
-  $VPS_DEFAULT_SHORTCUT upgrade        更新工具箱脚本
+  $VPS_DEFAULT_SHORTCUT upgrade        更新工具箱脚本 (支持热重载)
+  $VPS_DEFAULT_SHORTCUT rollback       回滚工具箱至上一备份版本 (.bak)
   $VPS_DEFAULT_SHORTCUT uninstall-self 卸载工具箱脚本
   $VPS_DEFAULT_SHORTCUT help           显示此帮助
 
@@ -4367,6 +5235,7 @@ vps_main() {
     vps_menu
   else
     case "$1" in
+        -v|--version|version)    printf 'v%s\n' "$sh_v" ;;
         info|信息)               shift; linux_info "$@" ;;
         update|更新)             linux_update ;;
         clean|清理)              linux_clean ;;
@@ -4374,17 +5243,19 @@ vps_main() {
         docker)                  docker_menu ;;
         caddy)                   caddy_menu ;;
         ts|tailscale)            vps_tailscale_menu ;;
-        bbr)                     linux_bbr ;;
+        bbr)                     shift; linux_bbr "$@" ;;
         warp)                    linux_warp ;;
         test|check|测试)         linux_test ;;
         settings|设置)           linux_settings ;;
         dd|reinstall|重装)       vps_dd_menu ;;
-        sshkey|key)              vps_ssh_key_menu ;;
+        sshkey|key)              shift; vps_ssh_key_menu "$@" ;;
+        sshport|ssh-port)        shift; change_ssh_port "$@" ;;
         f2b|fail2ban)            vps_fail2ban_menu ;;
-        fw|firewall|防火墙)      vps_firewall_menu ;;
+        fw|firewall|防火墙)      shift; vps_firewall_menu "$@" ;;
         diag|disk|排查)          shift; vps_diag_menu "$@" ;;
         opt|optimize|优化)       vps_optimize_menu ;;
-        dns)                     vps_dns_menu ;;
+        dns)                     shift; vps_dns_menu "$@" ;;
+        mirror|换源)             vps_switch_mirror ;;
         install|add|安装)        shift; pkg_install "$@" ;;
         remove|uninstall|卸载)   shift; pkg_remove "$@" ;;
         swap)                    shift; add_swap "$@" ;;
@@ -4397,6 +5268,7 @@ vps_main() {
         enable|自启)             shift; enable "$@" ;;
         shortcut|快捷键)         vps_set_shortcut ;;
         upgrade|update-self)     vps_update ;;
+        rollback|回滚)           vps_rollback ;;
         uninstall-self|remove-self) vps_uninstall ;;
         help|-h|--help)          vps_help ;;
         *)                       vps_help ;;

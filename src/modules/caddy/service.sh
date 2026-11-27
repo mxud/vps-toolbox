@@ -1,5 +1,31 @@
 # ============ Caddy 安装、服务与维护 ============
 
+caddy_ensure_firewall_ports() {
+    local ans
+    if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; then
+        if ! LC_ALL=C ufw status 2>/dev/null | grep -Eq '^80(/tcp)?[[:space:]]+ALLOW' ||
+           ! LC_ALL=C ufw status 2>/dev/null | grep -Eq '^443(/tcp)?[[:space:]]+ALLOW'; then
+            echo -e "${gl_huang}检测到 UFW 防火墙已启用，但尚未完整放行 80/443 (HTTP/HTTPS/HTTP3) 端口。${gl_bai}"
+            read -r -p "是否自动在 UFW 中放行 80/tcp、443/tcp 与 443/udp？[Y/n]: " ans || return 0
+            if [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]; then
+                ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null && ufw allow 443/udp >/dev/null &&
+                    echo -e "${gl_lv}已在 UFW 放行 80/tcp、443/tcp、443/udp${gl_bai}"
+            fi
+        fi
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        if ! firewall-cmd --query-port=80/tcp >/dev/null 2>&1 ||
+           ! firewall-cmd --query-port=443/tcp >/dev/null 2>&1; then
+            echo -e "${gl_huang}检测到 Firewalld 防火墙运行中，但尚未完整放行 80/443 端口。${gl_bai}"
+            read -r -p "是否自动在 Firewalld 中放行 80/tcp、443/tcp 与 443/udp？[Y/n]: " ans || return 0
+            if [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]; then
+                firewall-cmd --add-port=80/tcp --add-port=443/tcp --add-port=443/udp >/dev/null &&
+                    firewall-cmd --permanent --add-port=80/tcp --add-port=443/tcp --add-port=443/udp >/dev/null &&
+                    echo -e "${gl_lv}已在 Firewalld 放行 80/tcp、443/tcp、443/udp${gl_bai}"
+            fi
+        fi
+    fi
+}
+
 caddy_install() {
     caddy_need_root || return 1
     if command -v apt-get >/dev/null 2>&1; then
@@ -32,6 +58,7 @@ caddy_install() {
     fi
     enable caddy || true
     start caddy && echo -e "${gl_lv}Caddy 已就绪: $(caddy version)${gl_bai}"
+    caddy_ensure_firewall_ports
 }
 
 caddy_uninstall_keep_config() {
@@ -80,17 +107,43 @@ caddy_list() {
         service_action status caddy 2>/dev/null || true
     fi
     echo ""
-    echo -e "${gl_kjlan}========== 反代配置 ==========${gl_bai}"
+    echo -e "${gl_kjlan}========== 站点与反代摘要 ==========${gl_bai}"
     if [[ -d $CADDY_SITES ]]; then
-        local f
+        local f idx=1 domain stype target extra show_raw
         shopt -s nullglob
         local files=("$CADDY_SITES"/*.caddy)
         shopt -u nullglob
         if ((${#files[@]})); then
+            printf " %-4s %-28s %-14s %s\n" "序号" "域名" "类型" "后端目标 / 规则"
+            echo "----------------------------------------------------------------------------"
             for f in "${files[@]}"; do
-                echo -e "\n${gl_huang}--- $(basename "$f") ---${gl_bai}"
-                sed -n '1,120p' "$f"
+                domain=$(basename "$f" .caddy)
+                stype="自定义"
+                target="-"
+                extra=""
+                if grep -q '^[[:space:]]*redir[[:space:]]\+' "$f" 2>/dev/null; then
+                    stype="301重定向"
+                    target=$(awk '$1=="redir" {print $2; exit}' "$f")
+                elif grep -q '^[[:space:]]*reverse_proxy[[:space:]]\+' "$f" 2>/dev/null; then
+                    stype="反向代理"
+                    target=$(awk '$1=="reverse_proxy" {print $2; exit}' "$f")
+                    if grep -q 'tls_insecure_skip_verify' "$f" 2>/dev/null; then
+                        extra=" (跳过后端证书校验)"
+                    elif grep -q 'tls_server_name' "$f" 2>/dev/null; then
+                        extra=" (SNI: $(awk '$1=="tls_server_name" {print $2; exit}' "$f"))"
+                    fi
+                fi
+                printf " %-4s %-28s %-14s %s%s\n" "${idx}." "$domain" "$stype" "$target" "$extra"
+                idx=$((idx + 1))
             done
+            echo "----------------------------------------------------------------------------"
+            read -r -e -p "是否展开全部配置文件原文？[y/N]: " show_raw || return 0
+            if [[ "$show_raw" =~ ^[Yy]$ ]]; then
+                for f in "${files[@]}"; do
+                    echo -e "\n${gl_huang}--- $(basename "$f") ---${gl_bai}"
+                    sed -n '1,120p' "$f"
+                done
+            fi
         else
             echo -e "${gl_hui}目前没有由工具箱管理的反代配置。${gl_bai}"
         fi

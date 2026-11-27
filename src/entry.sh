@@ -11,6 +11,7 @@ vps_main() {
     vps_menu
   else
     case "$1" in
+        -v|--version|version)    printf 'v%s\n' "$sh_v" ;;
         info|信息)               shift; linux_info "$@" ;;
         update|更新)             linux_update ;;
         clean|清理)              linux_clean ;;
@@ -18,17 +19,19 @@ vps_main() {
         docker)                  docker_menu ;;
         caddy)                   caddy_menu ;;
         ts|tailscale)            vps_tailscale_menu ;;
-        bbr)                     linux_bbr ;;
+        bbr)                     shift; linux_bbr "$@" ;;
         warp)                    linux_warp ;;
         test|check|测试)         linux_test ;;
         settings|设置)           linux_settings ;;
         dd|reinstall|重装)       vps_dd_menu ;;
-        sshkey|key)              vps_ssh_key_menu ;;
+        sshkey|key)              shift; vps_ssh_key_menu "$@" ;;
+        sshport|ssh-port)        shift; change_ssh_port "$@" ;;
         f2b|fail2ban)            vps_fail2ban_menu ;;
-        fw|firewall|防火墙)      vps_firewall_menu ;;
+        fw|firewall|防火墙)      shift; vps_firewall_menu "$@" ;;
         diag|disk|排查)          shift; vps_diag_menu "$@" ;;
         opt|optimize|优化)       vps_optimize_menu ;;
-        dns)                     vps_dns_menu ;;
+        dns)                     shift; vps_dns_menu "$@" ;;
+        mirror|换源)             vps_switch_mirror ;;
         install|add|安装)        shift; pkg_install "$@" ;;
         remove|uninstall|卸载)   shift; pkg_remove "$@" ;;
         swap)                    shift; add_swap "$@" ;;
@@ -41,6 +44,7 @@ vps_main() {
         enable|自启)             shift; enable "$@" ;;
         shortcut|快捷键)         vps_set_shortcut ;;
         upgrade|update-self)     vps_update ;;
+        rollback|回滚)           vps_rollback ;;
         uninstall-self|remove-self) vps_uninstall ;;
         help|-h|--help)          vps_help ;;
         *)                       vps_help ;;

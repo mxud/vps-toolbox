@@ -13,6 +13,8 @@ linux_test() {
         echo "4. 三网回程多路线检测 (backtrace)"
         echo "5. 泰尔网速三网测速 (TaiErSpeedtest)"
         echo "6. TCP 重传率与网络质量探测 (TcpQuality)"
+        echo "11. 网络质量体检脚本 (NetQuality / Net.Check.Place)"
+        echo "12. NextTrace 三网快速回程测试 (nxtrace.org)"
         echo ""
         echo -e "${gl_huang}【 硬件性能测试 】${gl_bai}"
         echo "7. YABS 性能基准测试 (CPU/FIO/带宽)"
@@ -37,6 +39,13 @@ linux_test() {
             8)  check_swap; run_remote_bash "${gh_proxy}raw.githubusercontent.com/xykt/HardwareQuality/main/hq.sh" ;;
             9)  run_remote_bash "${gh_proxy}github.com/spiritLHLS/ecs/raw/main/ecs.sh" ;;
             10) run_remote_bash "https://run.NodeQuality.com" ;;
+            11) run_remote_bash "https://Net.Check.Place" ;;
+            12)
+                if ! command -v nexttrace >/dev/null 2>&1; then
+                    run_remote_bash "https://nxtrace.org/nt" || { break_end; continue; }
+                fi
+                nexttrace --fast-trace --tcp
+                ;;
             0)  break ;;
             *)  echo "无效选择" ; sleep 1 ; continue ;;
         esac

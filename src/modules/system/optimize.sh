@@ -7,20 +7,55 @@ VPS_OPT_JOURNALD="/etc/systemd/journald.conf.d/99-vps-toolbox.conf"
 
 vps_opt_apply_kernel() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
-    local mem_mb rmem_max wmem_max tcp_rmem tcp_wmem candidate
+    local mem_mb rmem_max wmem_max tcp_rmem tcp_wmem somaxconn backlog swappiness min_free_kb conntrack_max tier_name
+    local candidate line applied=0 skipped=0
     mem_mb=$(awk '/MemTotal:/ {print int(($2+512)/1024)}' /proc/meminfo 2>/dev/null || echo 512)
 
-    # 按物理内存自适应缓冲区大小，防止小内存机器 OOM
-    if [ "${mem_mb:-512}" -ge 2048 ]; then
+    # 按物理内存分为 4 档自适应计算缓冲区、队列与 VM 参数，兼顾高吞吐与小内存防 OOM
+    if [ "${mem_mb:-512}" -ge 8192 ]; then
+        tier_name="8G+ 高吞吐档"
+        rmem_max=33554432
+        wmem_max=33554432
+        tcp_rmem="4096 262144 33554432"
+        tcp_wmem="4096 262144 33554432"
+        somaxconn=8192
+        backlog=10000
+        swappiness=5
+        min_free_kb=131072
+        conntrack_max=524288
+    elif [ "${mem_mb:-512}" -ge 2048 ]; then
+        tier_name="2G-8G 标准档"
         rmem_max=16777216
         wmem_max=16777216
-        tcp_rmem="4096 87380 16777216"
-        tcp_wmem="4096 65536 16777216"
+        tcp_rmem="4096 131072 16777216"
+        tcp_wmem="4096 131072 16777216"
+        somaxconn=4096
+        backlog=5000
+        swappiness=10
+        min_free_kb=65536
+        conntrack_max=262144
+    elif [ "${mem_mb:-512}" -ge 512 ]; then
+        tier_name="512M-2G 轻量档"
+        rmem_max=8388608
+        wmem_max=8388608
+        tcp_rmem="4096 87380 8388608"
+        tcp_wmem="4096 65536 8388608"
+        somaxconn=2048
+        backlog=2048
+        swappiness=20
+        min_free_kb=32768
+        conntrack_max=65536
     else
-        rmem_max=4194304
-        wmem_max=4194304
-        tcp_rmem="4096 87380 4194304"
-        tcp_wmem="4096 65536 4194304"
+        tier_name="<512M 微型防OOM档"
+        rmem_max=2097152
+        wmem_max=2097152
+        tcp_rmem="4096 65536 2097152"
+        tcp_wmem="4096 65536 2097152"
+        somaxconn=1024
+        backlog=1000
+        swappiness=30
+        min_free_kb=16384
+        conntrack_max=32768
     fi
 
     bbr_on || echo "提示：BBR 开启未完全生效，继续应用其余内核优化。" >&2
@@ -28,25 +63,51 @@ vps_opt_apply_kernel() {
     [ ! -L "$VPS_OPT_SYSCTL" ] || { echo "拒绝覆盖符号链接: $VPS_OPT_SYSCTL" >&2; return 1; }
     mkdir -p /etc/sysctl.d || return 1
     candidate=$(mktemp /etc/sysctl.d/.vps-opt.XXXXXX) || return 1
-    cat > "$candidate" <<EOF
-# Managed by VPS Toolbox
-net.core.somaxconn = 4096
-net.core.netdev_max_backlog = 4096
+    {
+        cat <<EOF
+# Managed by VPS Toolbox (${tier_name}, Mem=${mem_mb}MB)
+net.core.somaxconn = ${somaxconn}
+net.core.netdev_max_backlog = ${backlog}
 net.core.rmem_max = ${rmem_max}
 net.core.wmem_max = ${wmem_max}
 net.ipv4.tcp_rmem = ${tcp_rmem}
 net.ipv4.tcp_wmem = ${tcp_wmem}
-net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_max_syn_backlog = ${somaxconn}
+net.ipv4.tcp_max_tw_buckets = 65536
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_fastopen = 3
-vm.swappiness = 10
+net.ipv4.ip_local_port_range = 1024 65535
+fs.file-max = 1048576
+vm.swappiness = ${swappiness}
+vm.vfs_cache_pressure = 50
+vm.min_free_kbytes = ${min_free_kb}
 EOF
+        if [ -f /proc/sys/net/netfilter/nf_conntrack_max ]; then
+            cat <<EOF
+net.netfilter.nf_conntrack_max = ${conntrack_max}
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+EOF
+        fi
+    } > "$candidate" || { rm -f -- "$candidate"; return 1; }
     chmod 644 "$candidate" && mv -f -- "$candidate" "$VPS_OPT_SYSCTL" || { rm -f -- "$candidate"; return 1; }
-    sysctl -p "$VPS_OPT_SYSCTL" >/dev/null 2>&1 || true
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        if sysctl -w "$line" >/dev/null 2>&1; then
+            applied=$((applied + 1))
+        else
+            skipped=$((skipped + 1))
+        fi
+    done < "$VPS_OPT_SYSCTL"
 
     # 提升文件描述符上限至 65535
     if [ ! -L "$VPS_OPT_LIMITS" ]; then
@@ -86,7 +147,7 @@ EOF
         fi
     fi
 
-    echo -e "${gl_lv}内核网络、BBR、文件句柄 (65535) 与日志限制 (100M/7d) 优化已完成${gl_bai}"
+    echo -e "${gl_lv}内核调优 (${tier_name}：${applied} 项生效${skipped:+，${skipped} 项容器/内核受限已跳过})、文件句柄 (65535) 与日志限制 (100M/7d) 已完成${gl_bai}"
 }
 
 vps_opt_auto_dns() {
@@ -191,7 +252,7 @@ vps_opt_status() {
     else
         ipc="系统默认"
     fi
-    dns_str=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    dns_str=$(vps_current_dns)
     docker_ver=$(docker --version 2>/dev/null || echo "未安装")
     if command -v fail2ban-client >/dev/null 2>&1 && fail2ban-client ping >/dev/null 2>&1; then
         f2b_str="运行中"

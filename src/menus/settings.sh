@@ -1,3 +1,40 @@
+vps_switch_mirror() {
+    root_use || return
+    local choice country
+    clear
+    echo -e "${gl_kjlan}==================== 切换系统软件源 ====================${gl_bai}"
+    echo "通过 LinuxMirrors 切换发行版软件源 (自动备份原配置)："
+    echo "1. 中国大陆镜像源 (交互式选择阿里/华为/清华/中科大等)"
+    echo "2. 海外地区镜像源 (交互式选择海外及官方源)"
+    echo "3. 中国教育网镜像源 (CERNET)"
+    echo "4. 按服务器位置自动静默优选 (国内用华为云，海外用官方源)"
+    echo -e "${gl_kjlan}--------------------------------------------------------${gl_bai}"
+    echo "0. 返回"
+    echo -e "${gl_kjlan}--------------------------------------------------------${gl_bai}"
+    read -r -e -p "请输入你的选择: " choice || return 0
+    case "$choice" in
+        1) run_remote_bash "https://linuxmirrors.cn/main.sh" ;;
+        2) run_remote_bash "https://linuxmirrors.cn/main.sh" --abroad ;;
+        3) run_remote_bash "https://linuxmirrors.cn/main.sh" --edu ;;
+        4)
+            country=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 3 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]' || true)
+            if [ "$country" = "CN" ]; then
+                echo "检测到国内网络环境，应用华为云 HTTPS 软件源..."
+                run_remote_bash "https://linuxmirrors.cn/main.sh" \
+                    --source mirrors.huaweicloud.com --protocol https --use-intranet-source false \
+                    --backup true --upgrade-software false --clean-cache false --ignore-backup-tips
+            else
+                echo "检测到海外网络环境，恢复/应用系统官方软件源..."
+                run_remote_bash "https://linuxmirrors.cn/main.sh" \
+                    --use-official-source true --protocol https --use-intranet-source false \
+                    --backup true --upgrade-software false --clean-cache false --ignore-backup-tips
+            fi
+            ;;
+        *) return 0 ;;
+    esac
+    break_end
+}
+
 linux_settings() {
     while true; do
         clear
@@ -19,7 +56,7 @@ linux_settings() {
             cur_ipc="系统默认"
         fi
 
-        cur_dns=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null | awk '{print $1,$2}')
+        cur_dns=$(vps_current_dns | awk '{print $1,$2}')
         [ -z "$cur_dns" ] && cur_dns="系统默认"
 
         echo -e "${gl_kjlan}======================= 系统工具 =======================${gl_bai}"
@@ -38,6 +75,7 @@ linux_settings() {
         printf " %-3s %-20s ${gl_hong}[纯内存在线重装]${gl_bai}\n" "10." "一键重装系统"
         printf " %-3s %-20s\n" "11." "一键重启服务器"
         printf " %-3s %-20s ${gl_hui}[大目录/Top 进程]${gl_bai}\n" "12." "磁盘与负载排查"
+        printf " %-3s %-20s ${gl_hui}[LinuxMirrors 换源]${gl_bai}\n" "18." "切换系统软件源"
         echo ""
         echo -e "${gl_huang}【 网络与规则 】${gl_bai}"
         printf " %-3s %-20s ${gl_hui}[当前: %s]${gl_bai}\n" "13." "优化 DNS 地址" "${cur_dns}"
@@ -66,9 +104,13 @@ linux_settings() {
             8)
                 clear
                 echo -e "当前虚拟内存: ${gl_huang}${cur_swap}${gl_bai}"
-                read -r -e -p "输入新的 swap 大小 (MB，输入 0 退出): " swap_size || return 0
-                [ "$swap_size" != "0" ] && [ -n "$swap_size" ] && add_swap "$swap_size"
-                break_end
+                echo "提示：输入 128-32768 设置大小 (MB)，输入 d 或 off 关闭并删除工具箱 Swap，输入 0 返回"
+                read -r -e -p "请输入: " swap_size || return 0
+                case "$swap_size" in
+                    0|"") ;;
+                    d|D|off|OFF|del) remove_swap; break_end ;;
+                    *) add_swap "$swap_size"; break_end ;;
+                esac
                 ;;
             9) timezone_menu ;;
             10) vps_dd_menu ;;
@@ -116,6 +158,7 @@ linux_settings() {
                 break_end
                 ;;
             17) clear; ss -tulnape; break_end ;;
+            18) vps_switch_mirror ;;
             0) break ;;
             *) echo "无效选择" ; sleep 1 ;;
         esac

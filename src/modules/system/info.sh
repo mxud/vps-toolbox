@@ -35,7 +35,7 @@ linux_info() {
         echo -e "${gl_kjlan}正在查询系统信息...${gl_bai}"
     fi
 
-    local ipv4_address ipv6_address output rx tx
+    local ipv4_address="" ipv6_address="" ipv4_isp="" ipv4_location="" output rx tx
     local cpu_info cpu_usage cpu_cores cpu_freq mem_info swap_info disk_info
     local os_info kernel hostname uptime_str load timezone current_time
     local congestion queue dns_servers tcp_conn udp_conn
@@ -45,7 +45,7 @@ linux_info() {
     tmp_ip=$(mktemp /tmp/vps_ip.XXXXXX)
     (
         ip_address
-        printf '%s\n%s\n' "$ipv4_address" "$ipv6_address" > "$tmp_ip"
+        printf '%s\n%s\n%s\n%s\n' "$ipv4_address" "$ipv6_address" "${ipv4_isp:-}" "${ipv4_location:-}" > "$tmp_ip"
     ) &
     local ip_pid=$!
 
@@ -66,6 +66,8 @@ linux_info() {
     {
         IFS= read -r ipv4_address || true
         IFS= read -r ipv6_address || true
+        IFS= read -r ipv4_isp || true
+        IFS= read -r ipv4_location || true
     } < "$tmp_ip"
     rm -f -- "$tmp_ip"
 
@@ -113,7 +115,7 @@ linux_info() {
     # 4. 融合指标：连接数与当前生效 DNS
     tcp_conn=$(ss -H -t 2>/dev/null | wc -l)
     udp_conn=$(ss -H -u 2>/dev/null | wc -l)
-    dns_servers=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    dns_servers=$(vps_current_dns)
 
     output_status
 
@@ -133,9 +135,11 @@ linux_info() {
         printf 'connections: tcp=%s udp=%s\n' "$tcp_conn" "$udp_conn"
         printf 'traffic: rx=%s tx=%s\n' "$rx" "$tx"
         printf 'tcp_cc: %s %s\n' "$congestion" "$queue"
-        [ -n "$ipv4_address" ] && printf 'ipv4: %s\n' "$ipv4_address"
-        [ -n "$ipv6_address" ] && printf 'ipv6: %s\n' "$ipv6_address"
-        [ -n "$dns_servers" ]  && printf 'dns: %s\n' "$dns_servers"
+        [ -n "$ipv4_isp" ]      && printf 'isp: %s\n' "$ipv4_isp"
+        [ -n "$ipv4_location" ] && printf 'location: %s\n' "$ipv4_location"
+        [ -n "$ipv4_address" ]  && printf 'ipv4: %s\n' "$ipv4_address"
+        [ -n "$ipv6_address" ]  && printf 'ipv6: %s\n' "$ipv6_address"
+        [ -n "$dns_servers" ]   && printf 'dns: %s\n' "$dns_servers"
         printf 'timezone: %s\n' "$timezone"
         printf 'time: %s\n' "$current_time"
         printf 'uptime: %s\n' "$uptime_str"
@@ -161,9 +165,11 @@ linux_info() {
     echo -e "${gl_kjlan}TCP/UDP 连接:  ${gl_bai}${tcp_conn} | ${udp_conn}"
     echo -e "${gl_kjlan}总接收/发送:   ${gl_bai}$rx / $tx"
     echo -e "${gl_kjlan}网络算法:      ${gl_bai}$congestion $queue"
-    [ -n "$ipv4_address" ] && echo -e "${gl_kjlan}IPv4 地址:     ${gl_bai}$ipv4_address"
-    [ -n "$ipv6_address" ] && echo -e "${gl_kjlan}IPv6 地址:     ${gl_bai}$ipv6_address"
-    [ -n "$dns_servers" ]  && echo -e "${gl_kjlan}DNS 地址:      ${gl_bai}$dns_servers"
+    [ -n "$ipv4_isp" ]      && echo -e "${gl_kjlan}运营商 (ASN):  ${gl_bai}$ipv4_isp"
+    [ -n "$ipv4_location" ] && echo -e "${gl_kjlan}地理位置:      ${gl_bai}$ipv4_location"
+    [ -n "$ipv4_address" ]  && echo -e "${gl_kjlan}IPv4 地址:     ${gl_bai}$ipv4_address"
+    [ -n "$ipv6_address" ]  && echo -e "${gl_kjlan}IPv6 地址:     ${gl_bai}$ipv6_address"
+    [ -n "$dns_servers" ]   && echo -e "${gl_kjlan}DNS 地址:      ${gl_bai}$dns_servers"
     echo -e "${gl_kjlan}--------------------------------------------------${gl_bai}"
     echo -e "${gl_kjlan}当前时区:      ${gl_bai}$timezone"
     echo -e "${gl_kjlan}系统时间:      ${gl_bai}$current_time"

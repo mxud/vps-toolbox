@@ -217,6 +217,32 @@ vps_ssh_policy() {
 }
 
 vps_ssh_key_menu() {
+    if [ "$#" -gt 0 ]; then
+        [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+        local sub="$1" arg="${2:-}" target_user="${3:-root}"
+        case "$sub" in
+            github)
+                [[ "$arg" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]] || { echo "GitHub 用户名无效" >&2; return 1; }
+                vps_ssh_select_user "$target_user" || return 1
+                vps_ssh_import_url "${gh_proxy}github.com/${arg}.keys"
+                return $?
+                ;;
+            https://*)
+                vps_ssh_select_user "${2:-root}" || return 1
+                vps_ssh_import_url "$sub"
+                return $?
+                ;;
+            ssh-*|ecdsa-*|sk-*)
+                vps_ssh_select_user "${2:-root}" || return 1
+                vps_ssh_add_key "$sub"
+                return $?
+                ;;
+            *)
+                echo "用法: $VPS_DEFAULT_SHORTCUT sshkey [github <用户名> [系统用户] | <HTTPS公钥URL> [系统用户] | \"<公钥内容>\" [系统用户]]" >&2
+                return 1
+                ;;
+        esac
+    fi
     root_use || return
     local choice input username status client_addr=${SSH_CONNECTION%% *}
     read -r -e -p "管理哪个 Linux 用户的密钥？(默认 root): " input || return 0

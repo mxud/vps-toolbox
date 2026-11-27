@@ -152,6 +152,52 @@ vps_fw_enable() {
     fi
 }
 
+vps_fw_ping_status() {
+    if [ "$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null || echo 0)" = "1" ]; then
+        printf 'disabled\n'
+    else
+        printf 'enabled\n'
+    fi
+}
+
+vps_fw_set_ping() {
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local mode="${1:-}" conf="/etc/sysctl.d/99-vps-icmp.conf" candidate
+    [ ! -L "$conf" ] || { echo "拒绝覆盖符号链接: $conf" >&2; return 1; }
+    case "$mode" in
+        off|disable|禁ping)
+            mkdir -p /etc/sysctl.d || return 1
+            candidate=$(mktemp /etc/sysctl.d/.vps-icmp.XXXXXX) || return 1
+            cat > "$candidate" <<EOF
+# Managed by VPS Toolbox (ICMP Ping block)
+net.ipv4.icmp_echo_ignore_all = 1
+net.ipv6.icmp.echo_ignore_all = 1
+EOF
+            chmod 644 "$candidate" && mv -f -- "$candidate" "$conf" || { rm -f -- "$candidate"; return 1; }
+            sysctl -w net.ipv4.icmp_echo_ignore_all=1 >/dev/null 2>&1 || return 1
+            sysctl -w net.ipv6.icmp.echo_ignore_all=1 >/dev/null 2>&1 || true
+            echo -e "${gl_lv}已开启禁 Ping (忽略所有 IPv4/IPv6 ICMP Echo 请求)${gl_bai}"
+            ;;
+        on|enable|允许)
+            rm -f -- "$conf"
+            sysctl -w net.ipv4.icmp_echo_ignore_all=0 >/dev/null 2>&1 || return 1
+            sysctl -w net.ipv6.icmp.echo_ignore_all=0 >/dev/null 2>&1 || true
+            echo -e "${gl_lv}已恢复允许 Ping (正常响应 ICMP Echo 请求)${gl_bai}"
+            ;;
+        status|状态)
+            if [ "$(vps_fw_ping_status)" = "disabled" ]; then
+                echo "当前 Ping 状态: 已禁 Ping (net.ipv4.icmp_echo_ignore_all=1)"
+            else
+                echo "当前 Ping 状态: 允许 Ping (net.ipv4.icmp_echo_ignore_all=0)"
+            fi
+            ;;
+        *)
+            echo "用法: $VPS_DEFAULT_SHORTCUT fw ping [on|off|status]" >&2
+            return 1
+            ;;
+    esac
+}
+
 vps_fw_disable() {
     local fw="$1" confirm
     read -r -p "确认停用防火墙？(Y/N): " confirm || return 0
@@ -164,20 +210,54 @@ vps_fw_disable() {
 }
 
 vps_firewall_menu() {
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            ping)
+                shift
+                vps_fw_set_ping "${1:-status}"
+                return $?
+                ;;
+            status|状态)
+                local cli_fw
+                cli_fw=$(vps_fw_detect || true)
+                [ -n "$cli_fw" ] && vps_fw_status "$cli_fw" || echo "未检测到 UFW 或 Firewalld"
+                vps_fw_set_ping status
+                return 0
+                ;;
+            *)
+                echo "用法: $VPS_DEFAULT_SHORTCUT fw [status | ping <on|off|status>]" >&2
+                return 1
+                ;;
+        esac
+    fi
     root_use || return
-    local fw choice state_str
+    local fw choice state_str ping_str
     while true; do
         clear
+        if [ "$(vps_fw_ping_status)" = "disabled" ]; then
+            ping_str="${gl_huang}已禁 Ping${gl_bai}"
+        else
+            ping_str="${gl_lv}允许 Ping${gl_bai}"
+        fi
         fw=$(vps_fw_detect || true)
         if [ -z "$fw" ]; then
             echo -e "${gl_kjlan}===================== 防火墙管理 =====================${gl_bai}"
-            echo "未检测到 UFW 或 Firewalld。"
+            echo -e "未检测到 UFW 或 Firewalld。    ICMP 状态: ${ping_str}"
             echo "1. 自动安装推荐防火墙 (Debian/Ubuntu: ufw, RHEL系: firewalld)"
+            echo "7. 一键开启 / 关闭禁 Ping (ICMP)"
             echo "0. 返回上一级"
             echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
             read -r -e -p "请输入你的选择: " choice || return 0
             case "$choice" in
                 1) vps_fw_install; break_end ;;
+                7)
+                    if [ "$(vps_fw_ping_status)" = "disabled" ]; then
+                        vps_fw_set_ping on
+                    else
+                        vps_fw_set_ping off
+                    fi
+                    break_end
+                    ;;
                 0) break ;;
                 *) echo "无效选择"; sleep 1 ;;
             esac
@@ -199,7 +279,7 @@ vps_firewall_menu() {
         fi
 
         echo -e "${gl_kjlan}===================== 防火墙管理 =====================${gl_bai}"
-        echo -e "当前状态: ${state_str}    SSH 端口: ${gl_huang}$(vps_fw_ssh_port)${gl_bai}"
+        echo -e "当前状态: ${state_str}    SSH 端口: ${gl_huang}$(vps_fw_ssh_port)${gl_bai}    ICMP: ${ping_str}"
         echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
         echo "1. 查看防火墙状态与规则"
         echo "2. 放行端口 (TCP/UDP)"
@@ -207,6 +287,7 @@ vps_firewall_menu() {
         echo "4. 放行指定 IP (白名单)"
         echo "5. 启用防火墙 (自动放行当前 SSH 端口)"
         echo "6. 停用防火墙"
+        echo -e "7. 一键切换禁 Ping (ICMP) [当前: ${ping_str}]"
         echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
         echo "0. 返回上一级"
         echo -e "${gl_kjlan}------------------------------------------------------${gl_bai}"
@@ -218,6 +299,14 @@ vps_firewall_menu() {
             4) vps_fw_allow_ip "$fw"; break_end ;;
             5) vps_fw_enable "$fw"; break_end ;;
             6) vps_fw_disable "$fw"; break_end ;;
+            7)
+                if [ "$(vps_fw_ping_status)" = "disabled" ]; then
+                    vps_fw_set_ping on
+                else
+                    vps_fw_set_ping off
+                fi
+                break_end
+                ;;
             0) break ;;
             *) echo "无效选择"; sleep 1 ;;
         esac

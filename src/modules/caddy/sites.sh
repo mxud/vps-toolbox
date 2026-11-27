@@ -1,19 +1,21 @@
 # ============ Caddy 站点与反代管理 ============
 
 caddy_add() {
-    local mode=$1 domain upstream target port ip sni filename
+    local mode=$1 domain upstream target port ip sni filename skip_tls="n"
     caddy_prepare || return 1
     read -r -e -p '站点域名（例如 app.example.com）: ' domain || return 1
     caddy_domain_ok "$domain" || { echo -e "${gl_hong}域名格式不正确${gl_bai}" >&2; return 1; }
     filename="$CADDY_SITES/${domain}.caddy"
     [[ ! -e $filename && ! -L $filename ]] || { echo -e "${gl_huang}此域名的配置文件已存在，不会覆盖（请使用编辑功能）${gl_bai}" >&2; return 1; }
     if [[ $mode == standard ]]; then
-        read -r -e -p '目标地址（直接输入端口号如 3000 将自动转为 127.0.0.1:3000，或输入完整地址）: ' upstream || return 1
+        read -r -e -p '目标地址（直接输入端口号如 3000 将自动转为 127.0.0.1:3000，或输入 http(s)://地址）: ' upstream || return 1
         if caddy_port_ok "$upstream"; then
             upstream="127.0.0.1:$((10#$upstream))"
             echo -e "已自动补全目标地址: ${gl_huang}${upstream}${gl_bai}"
         elif [[ $upstream =~ ^https?://[a-zA-Z0-9.:-]+$ || $upstream =~ ^[a-zA-Z0-9.:-]+$ ]]; then
-            :
+            if [[ $upstream == https://* ]]; then
+                read -r -e -p '后端是否为自签名 HTTPS 证书（忽略证书校验 tls_insecure_skip_verify）？[y/N]: ' skip_tls || return 1
+            fi
         else
             echo -e "${gl_hong}地址格式不正确（暂不支持路径、IPv6 字面量）${gl_bai}" >&2
             return 1
@@ -32,7 +34,20 @@ caddy_add() {
     fi
     caddy_snapshot || return 1
     if [[ $mode == standard ]]; then
-        printf '%s {\n    encode zstd gzip\n    reverse_proxy %s\n}\n' "$domain" "$upstream" > "$filename"
+        if [[ $skip_tls =~ ^[Yy]$ ]]; then
+            cat > "$filename" <<EOC
+$domain {
+    encode zstd gzip
+    reverse_proxy $upstream {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
+}
+EOC
+        else
+            printf '%s {\n    encode zstd gzip\n    reverse_proxy %s\n}\n' "$domain" "$upstream" > "$filename"
+        fi
     elif [[ $mode == redirect ]]; then
         printf '%s {\n    redir https://%s{uri} permanent\n}\n' "$domain" "$target" > "$filename"
     else
@@ -49,7 +64,11 @@ $domain {
 }
 EOC
     fi
-    caddy_apply
+    if caddy_apply; then
+        caddy_ensure_firewall_ports
+    else
+        return 1
+    fi
 }
 
 caddy_edit() {

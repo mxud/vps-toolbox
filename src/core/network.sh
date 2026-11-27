@@ -77,15 +77,45 @@ vps_set_ip_preference() {
     [ "$mode" != default ] || echo "已移除工具箱设置；如仍优先 IPv4，请检查原有 precedence 配置。"
 }
 
+vps_current_dns() {
+    local dns_out=""
+    if [ -d /run/systemd/system ] && command -v resolvectl >/dev/null 2>&1 &&
+       command systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        dns_out=$(resolvectl dns 2>/dev/null | awk -F': ' 'NF>1 && $2!="" {printf "%s ", $2}' |
+            awk '{for(i=1;i<=NF;i++) if($i!="127.0.0.53" && !seen[$i]++) printf "%s ", $i}')
+    fi
+    if [ -z "${dns_out//[[:space:]]/}" ] && [ -r /run/systemd/resolve/resolv.conf ]; then
+        dns_out=$(awk '/^[[:space:]]*nameserver[[:space:]]+/ && $2!="127.0.0.53" {if(!seen[$2]++) printf "%s ", $2}' /run/systemd/resolve/resolv.conf 2>/dev/null)
+    fi
+    if [ -z "${dns_out//[[:space:]]/}" ] && [ -r /etc/resolv.conf ]; then
+        dns_out=$(awk '/^[[:space:]]*nameserver[[:space:]]+/ {if(!seen[$2]++) printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    fi
+    printf '%s\n' "${dns_out%" "}"
+}
+
 ip_address() {
-    # 外部获取，移除容易取到 NAT 内部 IP 的路由判断
-    local v4 v6
-    v4=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipv4.ip.sb 2>/dev/null ||
-         curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipinfo.io/ip 2>/dev/null || true)
+    # 外部获取，一次请求同时提取 IPv4、运营商(ASN)与地理位置
+    local v4="" v6="" info_json="" country="" city="" org=""
+    info_json=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipinfo.io/json 2>/dev/null || true)
+    if [ -n "$info_json" ]; then
+        v4=$(printf '%s\n' "$info_json" | awk -F'"' '/"ip"[[:space:]]*:/ {print $4; exit}')
+        org=$(printf '%s\n' "$info_json" | awk -F'"' '/"org"[[:space:]]*:/ {print $4; exit}')
+        country=$(printf '%s\n' "$info_json" | awk -F'"' '/"country"[[:space:]]*:/ {print $4; exit}')
+        city=$(printf '%s\n' "$info_json" | awk -F'"' '/"city"[[:space:]]*:/ {print $4; exit}')
+    fi
+    if [ -z "$v4" ]; then
+        v4=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://ipv4.ip.sb 2>/dev/null || true)
+    fi
     v6=$(curl -fsS --proto '=https' --proto-redir '=https' --max-time 2 https://v6.ipinfo.io/ip 2>/dev/null || true)
     v4=$(printf '%s' "$v4" | tr -d '[:space:]')
     v6=$(printf '%s' "$v6" | tr -d '[:space:]')
     [[ "$v4" =~ ^[0-9.]+$ ]] && ipv4_address="$v4" || ipv4_address=""
     [[ "$v6" =~ ^[0-9A-Fa-f:.]+$ ]] && ipv6_address="$v6" || ipv6_address=""
+    ipv4_isp="$org"
+    if [ -n "$country" ] && [ -n "$city" ]; then
+        ipv4_location="$country / $city"
+    else
+        ipv4_location="${country}${city}"
+    fi
 }
 

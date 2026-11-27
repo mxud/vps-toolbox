@@ -91,7 +91,12 @@ vps_update() {
         fi
         rm -f -- "$tmp_file" "$sha_file"
         echo -e "${gl_lv}脚本已更新到 v$new_ver${gl_bai}（SHA256 校验通过）"
-        echo "重新启动 $VPS_INSTALL_PATH 后使用新版；旧版本备份: ${VPS_INSTALL_PATH}.bak（如更新前已安装）"
+        echo "旧版本备份: ${VPS_INSTALL_PATH}.bak（可使用 '$VPS_DEFAULT_SHORTCUT rollback' 一键回滚）"
+        if [ -t 0 ] && [ -t 1 ] && vps_is_toolbox "$VPS_INSTALL_PATH"; then
+            echo -e "${gl_kjlan}正在热重载切换至新版本 v$new_ver...${gl_bai}"
+            sleep 1
+            exec bash "$VPS_INSTALL_PATH"
+        fi
     else
         rm -f -- "$tmp_file" "$sha_file"
         echo -e "${gl_hong}更新失败：下载或校验未通过${gl_bai}"
@@ -99,6 +104,59 @@ vps_update() {
     fi
     break_end
     return "$result"
+}
+
+vps_rollback() {
+    clear
+    echo "脚本版本回滚"
+    echo "------------------------"
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "需要 root 权限才能回滚版本" >&2
+        break_end
+        return 1
+    fi
+    local bak_file="${VPS_INSTALL_PATH}.bak" current_ver="$sh_v" bak_ver staged install_dir confirm
+    if [ ! -f "$bak_file" ] || [ -L "$bak_file" ]; then
+        echo "未找到可回滚的备份文件: $bak_file" >&2
+        break_end
+        return 1
+    fi
+    if ! vps_is_toolbox "$bak_file"; then
+        echo "备份文件校验未通过，拒绝回滚: $bak_file" >&2
+        break_end
+        return 1
+    fi
+    if [ -f "$VPS_INSTALL_PATH" ] && [ ! -L "$VPS_INSTALL_PATH" ]; then
+        current_ver=$(grep '^sh_v=' "$VPS_INSTALL_PATH" | head -1 | cut -d'"' -f2 || echo "$sh_v")
+    fi
+    bak_ver=$(grep '^sh_v=' "$bak_file" | head -1 | cut -d'"' -f2)
+    echo -e "当前版本: ${gl_huang}v${current_ver}${gl_bai}"
+    echo -e "备份版本: ${gl_lv}v${bak_ver:-未知}${gl_bai} ($bak_file)"
+    echo "------------------------"
+    read -r -p "确认回滚到备份版本 v${bak_ver}？(Y/N): " confirm || return 0
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "已取消回滚"; break_end; return 0; }
+
+    install_dir=$(dirname -- "$VPS_INSTALL_PATH")
+    staged=$(mktemp "$install_dir/.vps-rollback.XXXXXX") || return 1
+    if ! command install -m 755 "$bak_file" "$staged" || ! vps_is_toolbox "$staged"; then
+        rm -f -- "$staged"
+        echo "回滚准备失败，原文件未修改" >&2
+        break_end
+        return 1
+    fi
+    if ! mv -fT -- "$staged" "$VPS_INSTALL_PATH"; then
+        rm -f -- "$staged"
+        echo "回滚替换失败" >&2
+        break_end
+        return 1
+    fi
+    echo -e "${gl_lv}已成功回滚至 v${bak_ver}${gl_bai}"
+    if [ -t 0 ] && [ -t 1 ] && vps_is_toolbox "$VPS_INSTALL_PATH"; then
+        echo -e "${gl_kjlan}正在热重载切换至 v${bak_ver}...${gl_bai}"
+        sleep 1
+        exec bash "$VPS_INSTALL_PATH"
+    fi
+    break_end
 }
 
 # ============ 主菜单 ============

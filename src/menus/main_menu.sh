@@ -24,7 +24,7 @@ vps_menu() {
         echo -e "${gl_kjlan}10.${gl_bai}  Caddy 管理"
         echo -e "${gl_kjlan}11.${gl_bai}  Tailscale 管理"
         echo -e "${gl_kjlan}------------------------${gl_bai}"
-        echo -e "${gl_kjlan}00.${gl_bai}  脚本更新"
+        echo -e "${gl_kjlan}00.${gl_bai}  脚本更新 / 回滚"
         echo -e "${gl_hong}99.${gl_bai}  卸载工具箱"
         echo -e "${gl_kjlan}0.${gl_bai}   退出脚本"
         echo -e "${gl_kjlan}------------------------${gl_bai}"
@@ -42,7 +42,23 @@ vps_menu() {
             9)  linux_settings ;;
             10) caddy_menu ;;
             11) vps_tailscale_menu ;;
-            00) vps_update ;;
+            00)
+                if [ -f "${VPS_INSTALL_PATH}.bak" ] && [ ! -L "${VPS_INSTALL_PATH}.bak" ]; then
+                    local up_act
+                    clear
+                    echo -e "当前版本: ${gl_huang}v$sh_v${gl_bai}  (检测到本地旧版备份)"
+                    echo "1. 在线检查并更新脚本"
+                    echo "2. 回滚到上一版本 (.bak)"
+                    echo "0. 返回"
+                    read -r -e -p "请选择: " up_act || return 0
+                    case "$up_act" in
+                        1) vps_update ;;
+                        2) vps_rollback ;;
+                    esac
+                else
+                    vps_update
+                fi
+                ;;
             99) vps_uninstall ;;
             0)  clear ; exit 0 ;;
             *)  echo "无效的输入" ; sleep 1 ;;

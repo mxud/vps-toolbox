@@ -16,4 +16,26 @@ dist_help="$(bash "$ROOT/dist/vps-toolbox.sh" help)"
 [[ "$dev_help" == "$dist_help" ]]
 dev_functions="$(bash -c 'source "$1"; declare -F | wc -l' _ "$ROOT/dist/vps-toolbox.sh")"
 [[ -n "$dev_functions" ]]
-echo 'PASS: syntax, build and help parity'
+
+# Unit tests for pure validation and version helper functions
+bash -c '
+set -euo pipefail
+source "$1"
+[[ "$(vps_main --version)" == "v$sh_v" ]]
+[[ "$(vps_version_value 0.3.0)" -gt "$(vps_version_value 0.2.1)" ]]
+vps_valid_port 22
+vps_valid_port 65535
+! vps_valid_port 0
+! vps_valid_port 65536
+vps_valid_hostname "node-1.example.com"
+! vps_valid_hostname "-bad.example.com"
+vps_dns_valid_ipv4 "1.1.1.1"
+! vps_dns_valid_ipv4 "256.1.1.1"
+vps_dns_valid_ipv6 "2606:4700:4700::1111"
+! vps_dns_valid_ipv6 "2606:4700::1111::1"
+caddy_domain_ok "app.example.com"
+! caddy_domain_ok "bad..example.com"
+[[ "$(vps_ts_format_tags "vps,tag:prod")" == "tag:vps,tag:prod" ]]
+' _ "$ROOT/dist/vps-toolbox.sh"
+
+echo 'PASS: syntax, build, help parity and unit checks'

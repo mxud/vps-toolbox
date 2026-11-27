@@ -6,11 +6,65 @@ check_swap() {
     fi
 }
 
-add_swap() {
-    local new_swap="${1:-}" swap_file old_file created=0
+vps_swap_in_container() {
+    if [ -f /proc/user_beancounters ] || grep -qaE '(container=lxc|container=openvz)' /proc/1/environ 2>/dev/null; then
+        return 0
+    fi
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        case "$(systemd-detect-virt --container 2>/dev/null || true)" in
+            lxc*|openvz|docker|podman|systemd-nspawn) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+remove_swap() {
     [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    local old_file removed=0
+    while IFS= read -r old_file; do
+        [[ "$old_file" =~ ^/swapfile-vps-[0-9]+m$ ]] || continue
+        if swapoff "$old_file"; then
+            sed -i "\\|^${old_file}[[:space:]]|d" /etc/fstab || return 1
+            rm -f -- "$old_file"
+            removed=$((removed + 1))
+        else
+            echo "无法关闭 $old_file（可能内存不足仍在使用）" >&2
+            return 1
+        fi
+    done < <(awk 'NR > 1 {print $1}' /proc/swaps 2>/dev/null)
+
+    shopt -s nullglob
+    for old_file in /swapfile-vps-*m; do
+        [[ "$old_file" =~ ^/swapfile-vps-[0-9]+m$ ]] || continue
+        if [ -f "$old_file" ] && [ ! -L "$old_file" ]; then
+            sed -i "\\|^${old_file}[[:space:]]|d" /etc/fstab 2>/dev/null || true
+            rm -f -- "$old_file" && removed=$((removed + 1))
+        fi
+    done
+    shopt -u nullglob
+
+    if [ "$removed" -gt 0 ]; then
+        echo -e "${gl_lv}已关闭并移除工具箱创建的 Swap 文件与 fstab 记录${gl_bai}"
+    else
+        echo "未检测到由工具箱创建的 Swap 文件（系统原有 Swap 保持不变）"
+    fi
+}
+
+add_swap() {
+    local new_swap="${1:-}" swap_file old_file created=0 fstype
+    [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; return 1; }
+    case "$new_swap" in
+        off|del|delete|remove|关闭|删除)
+            remove_swap
+            return $?
+            ;;
+    esac
+    if vps_swap_in_container; then
+        echo "检测到当前为容器虚拟化环境 (LXC/OpenVZ 等)，宿主机通常禁止容器自行挂载 Swap" >&2
+        return 1
+    fi
     [[ "$new_swap" =~ ^[0-9]{1,5}$ ]] || {
-        echo "swap 大小请输入 128 至 32768 MB 的整数" >&2
+        echo "swap 大小请输入 128 至 32768 MB 的整数（或输入 off 关闭工具箱 Swap）" >&2
         return 1
     }
     new_swap=$((10#$new_swap))
@@ -23,12 +77,23 @@ add_swap() {
         echo "swap 路径必须是普通文件，拒绝使用符号链接或设备" >&2; return 1;
     }
     if [ ! -e "$swap_file" ]; then
-        (umask 077; fallocate -l "${new_swap}M" "$swap_file" 2>/dev/null || dd if=/dev/zero of="$swap_file" bs=1M count="$new_swap") || { rm -f -- "$swap_file"; return 1; }
-        created=1
-        chmod 600 "$swap_file" && mkswap "$swap_file" >/dev/null || {
-            rm -f -- "$swap_file"
-            return 1
-        }
+        fstype=$(df -PT / 2>/dev/null | awk 'NR==2 {print $2}')
+        if [ "$fstype" = "btrfs" ] && command -v btrfs >/dev/null 2>&1 &&
+           btrfs filesystem mkswapfile --size "${new_swap}m" "$swap_file" >/dev/null 2>&1; then
+            created=1
+            chmod 600 "$swap_file" || { rm -f -- "$swap_file"; return 1; }
+        else
+            if [ "$fstype" = "btrfs" ]; then
+                (umask 077; : > "$swap_file") || return 1
+                command -v chattr >/dev/null 2>&1 && chattr +C "$swap_file" >/dev/null 2>&1 || true
+            fi
+            (umask 077; fallocate -l "${new_swap}M" "$swap_file" 2>/dev/null || dd if=/dev/zero of="$swap_file" bs=1M count="$new_swap") || { rm -f -- "$swap_file"; return 1; }
+            created=1
+            chmod 600 "$swap_file" && mkswap "$swap_file" >/dev/null || {
+                rm -f -- "$swap_file"
+                return 1
+            }
+        fi
     fi
     if ! awk 'NR > 1 {print $1}' /proc/swaps | grep -Fxq -- "$swap_file"; then
         swapon "$swap_file" || { [ "$created" -eq 0 ] || rm -f -- "$swap_file"; return 1; }

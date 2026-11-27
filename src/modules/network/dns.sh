@@ -218,6 +218,15 @@ vps_dns_restore() {
 }
 
 vps_dns_menu() {
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            auto|自动) vps_opt_auto_dns; return $? ;;
+            restore|恢复) vps_dns_restore; return $? ;;
+            cn|国内) vps_dns_apply "223.5.5.5" "119.29.29.29" "2400:3200::1" "2400:3200:baba::1"; return $? ;;
+            global|intl|国外) vps_dns_apply "1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888"; return $? ;;
+            *) vps_dns_apply "${1:-}" "${2:-}" "${3:-}" "${4:-}"; return $? ;;
+        esac
+    fi
     root_use || return
     local choice first_v4 second_v4 first_v6 second_v6
 
