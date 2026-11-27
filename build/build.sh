@@ -23,9 +23,9 @@ bash -n "$STAGED"
 chmod 755 "$STAGED"
 mv -f -- "$STAGED" "$OUT"
 if command -v sha256sum >/dev/null 2>&1; then
-    (cd -- "$ROOT/dist" && sha256sum vps-toolbox.sh > vps-toolbox.sh.sha256)
+    (cd -- "$ROOT/dist" && printf '%s  vps-toolbox.sh\n' "$(sha256sum vps-toolbox.sh | awk '{print $1}')" > vps-toolbox.sh.sha256)
 elif command -v shasum >/dev/null 2>&1; then
-    (cd -- "$ROOT/dist" && shasum -a 256 vps-toolbox.sh > vps-toolbox.sh.sha256)
+    (cd -- "$ROOT/dist" && printf '%s  vps-toolbox.sh\n' "$(shasum -a 256 vps-toolbox.sh | awk '{print $1}')" > vps-toolbox.sh.sha256)
 fi
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck -S warning "$OUT" || echo 'ShellCheck reported existing script warnings.' >&2
